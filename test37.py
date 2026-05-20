@@ -1,0 +1,2924 @@
+# L2 J6B综合诊断工具 原界面版（修复FDA读不到故障｜端口9034）
+from flask import Flask, render_template_string, request, jsonify
+import socket
+import struct
+from datetime import datetime
+import time
+import threading
+import re
+import webbrowser
+
+app = Flask(__name__)
+
+# ====================== 配置 ======================
+GW_IP = "169.254.1.0"
+UDS_PORT = 13400
+SOURCE_ADDR = 0xEF5
+TARGET_ADDR_ADM = 0x006F
+SERVER_PORT = 9034
+
+DID_MAP = {
+    "FDA3": b"\x22\xFD\xA3",
+    "FDA0": b"\x22\xFD\xA0",
+    "FDA7": b"\x22\xFD\xA7"
+}
+
+keep_alive_flag = False
+
+# FDA3故障库
+fda3_fault_db = {
+(0, 0): {"name": "", "desc": ""},
+(0, 1): {"name": "", "desc": ""},
+(0, 2): {"name": "", "desc": ""},
+(0, 3): {"name": "", "desc": ""},
+(0, 4): {"name": "", "desc": ""},
+(0, 5): {"name": "", "desc": ""},
+(0, 6): {"name": "", "desc": ""},
+(0, 7): {"name": "", "desc": ""},
+(1, 0): {"name": "", "desc": ""},
+(1, 1): {"name": "", "desc": ""},
+(1, 2): {"name": "", "desc": ""},
+(1, 3): {"name": "", "desc": ""},
+(1, 4): {"name": "", "desc": ""},
+(1, 5): {"name": "", "desc": ""},
+(1, 6): {"name": "", "desc": ""},
+(1, 7): {"name": "", "desc": ""},
+(2, 0): {"name": "", "desc": ""},
+(2, 1): {"name": "", "desc": ""},
+(2, 2): {"name": "", "desc": ""},
+(2, 3): {"name": "", "desc": ""},
+(2, 4): {"name": "", "desc": ""},
+(2, 5): {"name": "", "desc": ""},
+(2, 6): {"name": "", "desc": ""},
+(2, 7): {"name": "", "desc": ""},
+(3, 0): {"name": "F120camNotCalib_fault", "desc": "前视cam标定未成功或未标定时"},
+(3, 1): {"name": "F120camSNdiff_fault", "desc": "前视cam序列号比对错误"},
+(3, 2): {"name": "No8camSNdiff_fault", "desc": "8号环视cam序列号比对错误-前"},
+(3, 3): {"name": "No9camSNdiff_fault", "desc": "9号环视cam序列号比对错误-左"},
+(3, 4): {"name": "No10camSNdiff_fault", "desc": "10号环视cam序列号比对错误-右"},
+(3, 5): {"name": "No11camSNdiff_fault", "desc": "11号环视cam序列号比对错误-后"},
+(3, 6): {"name": "SWcamNotCalib_fault", "desc": "任意环视cam标定未成功或未标定时"},
+(3, 7): {"name": "", "desc": ""},
+(4, 0): {"name": "vehicle_config_fault", "desc": "无车辆配置信息"},
+(4, 1): {"name": "DSSCDAWorkState", "desc": "DSSCDA工作不工作"},
+(4, 2): {"name": "DSSCDASpaceWraning", "desc": "DSSCDA数据存储空间足不足"},
+(4, 3): {"name": "", "desc": ""},
+(4, 4): {"name": "", "desc": ""},
+(4, 5): {"name": "", "desc": ""},
+(4, 6): {"name": "", "desc": ""},
+(4, 7): {"name": "", "desc": ""},
+(5, 0): {"name": "", "desc": ""},
+(5, 1): {"name": "", "desc": ""},
+(5, 2): {"name": "", "desc": ""},
+(5, 3): {"name": "", "desc": ""},
+(5, 4): {"name": "", "desc": ""},
+(5, 5): {"name": "", "desc": ""},
+(5, 6): {"name": "", "desc": ""},
+(5, 7): {"name": "PCAN_BUS_OFF", "desc": "该Fault诊断PCAN发生busoff event"},
+(6, 0): {"name": "CCAN_BUS_OFF", "desc": "该Fault诊断CCAN发生busoff event"},
+(6, 1): {"name": "S1CAN_BUS_OFF", "desc": "该Fault诊断S1CAN发生busoff event"},
+(6, 2): {"name": "S2CAN_BUS_OFF", "desc": "该Fault诊断S2CAN发生busoff event"},
+(6, 3): {"name": "", "desc": ""},
+(6, 4): {"name": "", "desc": ""},
+(6, 5): {"name": "", "desc": ""},
+(6, 6): {"name": "TSR_FVC_SENSE_01", "desc": "OX08D10  SM01 Online pixel test，X8D信号流错误"},
+(6, 7): {"name": "TSR_FVC_SENSE_03", "desc": "OX08D10  SM03 Analog test pattern row checker"},
+(7, 0): {"name": "TSR_FVC_SENSE_06", "desc": "OX08D10  SM06 ID checker(row)"},
+(7, 1): {"name": "TSR_FVC_SENSE_07", "desc": "OX08D10  SM06 ID checker(column)"},
+(7, 2): {"name": "TSR_FVC_SENSE_08", "desc": "OX08D10  SM07 Array row control check (xcheck)"},
+(7, 3): {"name": "TSR_FVC_SENSE_09", "desc": "OX08D10  SM08 Internal reference voltage"},
+(7, 4): {"name": "TSR_FVC_SENSE_10", "desc": "OX08D10  SM09 Analog to digital sync check"},
+(7, 5): {"name": "TSR_FVC_SENSE_12", "desc": "OX08D10  SM11 Digital test pattern rows checker"},
+(7, 6): {"name": "TSR_FVC_SENSE_13", "desc": "OX08D10  SM12 BLC faults (0 and 1)"},
+(7, 7): {"name": "TSR_FVC_SENSE_14", "desc": "OX08D10  SM13 Sensor exposure check"},
+(8, 0): {"name": "TSR_FVC_SENSE_15", "desc": "OX08D10  SM14 PLL clock monitor and PLL lock"},
+(8, 1): {"name": "", "desc": ""},
+(8, 2): {"name": "TSR_FVC_SENSE_17", "desc": "OX08D10  SM16 SCCB CRC\nI2C写入操作后，读取[3180],[3180]查看CRC是否正确，\n如果不匹配需要重新写入；\n如果仍然不匹配，需要reset 前视摄像头；"},
+(8, 3): {"name": "TSR_FVC_SENSE_18", "desc": "OX08D10  SM17 PEC and Internal register read-back"},
+(8, 4): {"name": "", "desc": ""},
+(8, 5): {"name": "TSR_FVC_SENSE_22", "desc": "OX08D10  SM22 Si default register check"},
+(8, 6): {"name": "TSR_FVC_SENSE_25", "desc": "OX08D10  SM25 Output FIFO (VFIFO) CRC"},
+(8, 7): {"name": "TSR_FVC_SENSE_26", "desc": "OX08D10  SM26 ROM CRC"},
+(9, 0): {"name": "TSR_FVC_SENSE_27", "desc": "OX08D10  SM27 OTP CRC （摄像头上电300ms后，检查一次寄存器4f0e[7] ，4F0a[7]）"},
+(9, 1): {"name": "TSR_FVC_SENSE_28", "desc": "OX08D10  SM29 SRAM built in self-test"},
+(9, 2): {"name": "TSR_FVC_SENSE_29", "desc": "OX08D10  SM30 Group hold CRC"},
+(9, 3): {"name": "TSR_FVC_SENSE_30", "desc": "OX08D10  SM31 Temperature sensor"},
+(9, 4): {"name": "TSR_FVC_SENSE_31", "desc": "OX08D10  SM32 Voltage sensor external supply"},
+(9, 5): {"name": "TSR_FVC_SENSE_33", "desc": "OX08D10  SM34 ERRB pin state monitor"},
+(9, 6): {"name": "TSR_FVC_SENSE_34", "desc": "OX08D10  SM35 Fault out fault"},
+(9, 7): {"name": "TSR_FVC_SENSE_36", "desc": "OX08D10  SM37 System control timeout"},
+(10, 0): {"name": "TSR_FVC_SENSE_38", "desc": "OX08D10   Temperature Monitor\nOX08D10寄存器： 0x4D2A（整数部分）、0x4D2B（小数部分）"},
+(10, 1): {"name": "", "desc": ""},
+(10, 2): {"name": "TSR_FVC_PMIC_01;", "desc": "PMIC DM-INT-01 :BUCK1 OVP"},
+(10, 3): {"name": "TSR_FVC_PMIC_02;", "desc": "PMIC DM-INT-02 :BUCK1 UVP"},
+(10, 4): {"name": "TSR_FVC_PMIC_03;", "desc": "PMIC DM-INT-03 :BUCK2 OVP"},
+(10, 5): {"name": "TSR_FVC_PMIC_04;", "desc": "PMIC DM-INT-04 :BUCK2 UVP"},
+(10, 6): {"name": "TSR_FVC_PMIC_05;", "desc": "PMIC DM-INT-05 :BUCK3 OVP"},
+(10, 7): {"name": "TSR_FVC_PMIC_06;", "desc": "PMIC DM-INT-06 :BUCK3 UVP"},
+(11, 0): {"name": "TSR_FVC_PMIC_07;", "desc": "PMIC DM-INT-07 :LDO OVP"},
+(11, 1): {"name": "TSR_FVC_PMIC_08;", "desc": "PMIC DM-INT-08 :LDO UVP"},
+(11, 2): {"name": "TSR_FVC_PMIC_13;", "desc": "PMIC DM-INT-13 :OTP(temperature)"},
+(11, 3): {"name": "TSR_FVC_PMIC_14;", "desc": "PMIC DM-INT-14 :VIN OVP"},
+(11, 4): {"name": "TSR_FVC_PMIC_17", "desc": "PMIC DM-INT-17 :Regulator enable/configuration register bits write control"},
+(11, 5): {"name": "TSR_FVC_PMIC_18", "desc": "PMIC DM-INT-18 :I2C CRC"},
+(11, 6): {"name": "TSR_FVC_PMIC_19;", "desc": "PMIC DM-INT-19 :OTP CRC"},
+(11, 7): {"name": "TSR_FVC_PMIC_20;", "desc": "PMIC DM-EXT-05 :ABIST by master"},
+(12, 0): {"name": "", "desc": ""},
+(12, 1): {"name": "", "desc": ""},
+(12, 2): {"name": "", "desc": ""},
+(12, 3): {"name": "", "desc": ""},
+(12, 4): {"name": "", "desc": ""},
+(12, 5): {"name": "", "desc": ""},
+(12, 6): {"name": "96717_CRCforControlChannel", "desc": "MAX96717芯片的CRC for Control Channel"},
+(12, 7): {"name": "96717_Error Correction through Re-tranmission for Control Channel", "desc": "MAX96717芯片的Error Correction through Re-tranmission for Control Channel"},
+(13, 0): {"name": "96717_LOCK", "desc": "MAX96717芯片的LOCK indicator of Forward and Reverse Channels"},
+(13, 1): {"name": "96717_ERRb", "desc": "MAX96717芯片的ERRB indicator of Reverse Channel"},
+(13, 2): {"name": "96717_Voltage Measurement and Overvoltage/Undervoltage Monitoring", "desc": "MAX96717芯片的 Voltage Measurement and Overvoltage/Undervoltage Monitoring"},
+(13, 3): {"name": "96717 CSI-2 ECC/CRC", "desc": "MAX96717芯片的Evaluate CSI-2 ECC/CRC"},
+(13, 4): {"name": "96717 FIFO_OverflowDetection", "desc": "MAX96717芯片的FIFO Overflow Detection"},
+(13, 5): {"name": "96717_LogicBist", "desc": "MAX96717芯片的LogicBist"},
+(13, 6): {"name": "96717_MemoryBist", "desc": "MAX96717芯片的LogicBist"},
+(13, 7): {"name": "96717_OTW", "desc": "MAX96717芯片的Overtemperature warning"},
+(14, 0): {"name": "96717_ADCBist", "desc": "MAX96717芯片的ADC-BIST"},
+(14, 1): {"name": "TSR_FVC_Ser_15", "desc": "MAX96717 SM26 Memory ECC"},
+(14, 2): {"name": "TSR_FVC_Ser_16", "desc": "MAX96717 SM29 CRC of non‐volatile memory"},
+(14, 3): {"name": "TSR_FVC_Ser_17/TSR_FVC_Ser_19", "desc": "MAX96717 SM33 9b/10b illegal symbol check, running disparity"},
+(14, 4): {"name": "TSR_FVC_Ser_18", "desc": "MAX96717 SM35 I2C Timeout verification on I2C"},
+(14, 5): {"name": "TSR_FVC_Ser_19", "desc": "MAX96717 SM36 Info frame is sent periodically and checked at receiver, CRC protected"},
+(14, 6): {"name": "TSR_FVC_Ser_20", "desc": "MAX96717 SM37 CRC on configuration data for data retention memory"},
+(14, 7): {"name": "DMS_BIST(只有低配有)", "desc": "DMS BIST"},
+(15, 0): {"name": "DMS_MemoryECC(只有低配有)", "desc": "DMS_MemoryECC"},
+(15, 1): {"name": "DMS_CRC(只有低配有)", "desc": "DMS CRC of non-volatile memory"},
+(15, 2): {"name": "TSR_DMS_04(只有低配有)", "desc": "DMS FIFO Overflow Detection(cycle=50ms)"},
+(15, 3): {"name": "TSR_DMS_05(只有低配有)", "desc": "DMS Evaluate CSI-2 ECC/CRC(cycle=50ms)"},
+(15, 4): {"name": "TSR_DMS_06(只有低配有)", "desc": "DMS 9b/10b illegal symbol check, running disparity(cycle=50ms)"},
+(15, 5): {"name": "TSR_DMS_07(只有低配有 基于FDC7，8155低配  8255是高配)", "desc": "DMS Info frame is sent periodically and checked at receiver(cycle=50ms)"},
+(15, 6): {"name": "TSR_DMS_08(只有低配有)", "desc": "DMS CRC for Control Channel\nSM21 CRC on I2C and UART transactions(cycle=50ms)"},
+(15, 7): {"name": "TSR_DMS_09(只有低配有)", "desc": "DMS Error Correction through Re-transmission on Control Channel(cycle=50ms)"},
+(16, 0): {"name": "TSR_DMS_10(只有低配有)", "desc": "DMS LOCK indicator of Forward Channel\nSM8 LOCK indicator of Reverse Channel(cycle=50ms)"},
+(16, 1): {"name": "TSR_DMS_11(只有低配有)", "desc": "DMS Voltage Measurement and Overvoltage/Undervoltage Monitoring(cycle=50ms)"},
+(16, 2): {"name": "TSR_DMS_12(只有低配有)", "desc": "DMS INTR monitor(cycle=50ms)"},
+(16, 3): {"name": "TSR_DMS_13(只有低配有)", "desc": "DMS Supply Voltage Monitor(cycle=50ms)"},
+(16, 4): {"name": "TSR_DMS_14(只有低配有)", "desc": "DMS PLL Monitor(cycle=50ms)"},
+(16, 5): {"name": "TSR_DMS_15(只有低配有)", "desc": "DMS Temperature Sensor Monitor(cycle=50ms)"},
+(16, 6): {"name": "TSR_DMS_16(只有低配有)", "desc": "DMS Column ID Monitor/Row ID Monitor(cycle=50ms)"},
+(16, 7): {"name": "TSR_DMS_17(只有低配有)", "desc": "DMS Defect Pixel Number Detect(cycle=50ms)"},
+(17, 0): {"name": "TSR_DMS_18(只有低配有)", "desc": "DMS EEPROM Monitor(cycle=50ms)"},
+(17, 1): {"name": "TSR_DMS_19(只有低配有)", "desc": "LED 故障检测，检测LED是否存在过压、过流、过温、开路、断路等故障(cycle=50ms)"},
+(17, 2): {"name": "", "desc": ""},
+(17, 3): {"name": "USS_FLS_ OT", "desc": "FLS探头温度故障"},
+(17, 4): {"name": "USS_FLS_ HWErr", "desc": "FLS探头硬件故障"},
+(17, 5): {"name": "USS_FLS_LineErr", "desc": "FLS探头对电池短路或开路或对地短路"},
+(17, 6): {"name": "USS_FLS_DsiERR", "desc": "FLS探头与 ELMOS间的通讯出现异常"},
+(17, 7): {"name": "USS_FLS_VSourceErr", "desc": "ELMOS给FLS探头的供电出现异常"},
+(18, 0): {"name": "USS_FLS_AftershocksErr", "desc": "FLS探头余震异常"},
+(18, 1): {"name": "USS_FLC_ OT", "desc": "FLC探头温度故障"},
+(18, 2): {"name": "USS_FLC_ HWErr", "desc": "FLC探头硬件故障"},
+(18, 3): {"name": "USS_FLC_LineErr", "desc": "FLC探头对电池短路或开路或对地短路"},
+(18, 4): {"name": "USS_FLC_DsiERR", "desc": "FLC探头与 ELMOS间的通讯出现异常"},
+(18, 5): {"name": "USS_FLC_VSourceErr", "desc": "ELMOS给FLC探头的供电出现异常"},
+(18, 6): {"name": "USS_FLC_AftershocksErr", "desc": "FLC探头余震异常"},
+(18, 7): {"name": "USS_FLM_ OT", "desc": "FLM探头温度故障"},
+(19, 0): {"name": "USS_FLM_ HWErr", "desc": "FLM探头硬件故障"},
+(19, 1): {"name": "USS_FLM_LineErr", "desc": "FLM探头对电池短路或开路或对地短路"},
+(19, 2): {"name": "USS_FLM_DsiERR", "desc": "FLM探头与 ELMOS间的通讯出现异常"},
+(19, 3): {"name": "USS_FLM_VSourceErr", "desc": "ELMOS给FLM探头的供电出现异常"},
+(19, 4): {"name": "USS_FLM_AftershocksErr", "desc": "FLM探头余震异常"},
+(19, 5): {"name": "USS_FRM_ OT", "desc": "FRM探头温度故障"},
+(19, 6): {"name": "USS_FRM_ HWErr", "desc": "FRM探头硬件故障"},
+(19, 7): {"name": "USS_FRM_LineErr", "desc": "FRM探头对电池短路或开路或对地短路"},
+(20, 0): {"name": "USS_FRM_DsiERR", "desc": "FRM探头与 ELMOS间的通讯出现异常"},
+(20, 1): {"name": "USS_FRM_VSourceErr", "desc": "ELMOS给FRM探头的供电出现异常"},
+(20, 2): {"name": "USS_FRM_AftershocksErr", "desc": "FRM探头余震异常"},
+(20, 3): {"name": "USS_FRC_ OT", "desc": "FRC探头温度故障"},
+(20, 4): {"name": "USS_FRC_ HWErr", "desc": "FRC探头硬件故障"},
+(20, 5): {"name": "USS_FRC_LineErr", "desc": "FRC探头对电池短路或开路或对地短路"},
+(20, 6): {"name": "USS_FRC_DsiERR", "desc": "FRC探头与 ELMOS间的通讯出现异常"},
+(20, 7): {"name": "USS_FRC_VSourceErr", "desc": "ELMOS给FRC探头的供电出现异常"},
+(21, 0): {"name": "USS_FRC_AftershocksErr", "desc": "FRC探头余震异常"},
+(21, 1): {"name": "USS_FRS_ OT", "desc": "FRS探头温度故障"},
+(21, 2): {"name": "USS_FRS_ HWErr", "desc": "FRS探头硬件故障"},
+(21, 3): {"name": "USS_FRS_LineErr", "desc": "FRS探头对电池短路或开路或对地短路"},
+(21, 4): {"name": "USS_FRS_DsiERR", "desc": "FRS探头与 ELMOS间的通讯出现异常"},
+(21, 5): {"name": "USS_FRS_VSourceErr", "desc": "ELMOS给FRS探头的供电出现异常"},
+(21, 6): {"name": "USS_FRS_AftershocksErr", "desc": "FRS探头余震异常"},
+(21, 7): {"name": "USS_RLS_ OT", "desc": "RLS探头温度故障"},
+(22, 0): {"name": "USS_RLS_ HWErr", "desc": "RLS探头硬件故障"},
+(22, 1): {"name": "USS_RLS_LineErr", "desc": "RLS探头对电池短路或开路或对地短路"},
+(22, 2): {"name": "USS_RLS_DsiERR", "desc": "RLS探头与 ELMOS间的通讯出现异常"},
+(22, 3): {"name": "USS_RLS_VSourceErr", "desc": "ELMOS给RLS探头的供电出现异常"},
+(22, 4): {"name": "USS_RLS_AftershocksErr", "desc": "RLS探头余震异常"},
+(22, 5): {"name": "USS_RLC_ OT", "desc": "RLC探头温度故障"},
+(22, 6): {"name": "USS_RLC_ HWErr", "desc": "RLC探头硬件故障"},
+(22, 7): {"name": "USS_RLC_LineErr", "desc": "RLC探头对电池短路或开路或对地短路"},
+(23, 0): {"name": "USS_RLC_DsiERR", "desc": "RLC探头与 ELMOS间的通讯出现异常"},
+(23, 1): {"name": "USS_RLC_VSourceErr", "desc": "ELMOS给RLC探头的供电出现异常"},
+(23, 2): {"name": "USS_RLC_AftershocksErr", "desc": "RLC探头余震异常"},
+(23, 3): {"name": "USS_RLM_ OT", "desc": "RLM探头温度故障"},
+(23, 4): {"name": "USS_RLM_ HWErr", "desc": "RLM探头硬件故障"},
+(23, 5): {"name": "USS_RLM_LineErr", "desc": "RLM探头对电池短路或开路或对地短路"},
+(23, 6): {"name": "USS_RLM_DsiERR", "desc": "RLM探头与 ELMOS间的通讯出现异常"},
+(23, 7): {"name": "USS_RLM_VSourceErr", "desc": "ELMOS给RLM探头的供电出现异常"},
+(24, 0): {"name": "USS_RLM_AftershocksErr", "desc": "RLM探头余震异常"},
+(24, 1): {"name": "USS_RRM_ OT", "desc": "RRM探头温度故障"},
+(24, 2): {"name": "USS_RRM_ HWErr", "desc": "RRM探头硬件故障"},
+(24, 3): {"name": "USS_RRM_LineErr", "desc": "RRM探头对电池短路或开路或对地短路"},
+(24, 4): {"name": "USS_RRM_DsiERR", "desc": "RRM探头与 ELMOS间的通讯出现异常"},
+(24, 5): {"name": "USS_RRM_VSourceErr", "desc": "ELMOS给RRM探头的供电出现异常"},
+(24, 6): {"name": "USS_RRM_AftershocksErr", "desc": "RRM探头余震异常"},
+(24, 7): {"name": "USS_RRC_ OT", "desc": "RRC探头温度故障"},
+(25, 0): {"name": "USS_RRC_ HWErr", "desc": "RRC探头硬件故障"},
+(25, 1): {"name": "USS_RRC_LineErr", "desc": "RRC探头对电池短路或开路或对地短路"},
+(25, 2): {"name": "USS_RRC_DsiERR", "desc": "RRC探头与 ELMOS间的通讯出现异常"},
+(25, 3): {"name": "USS_RRC_VSourceErr", "desc": "ELMOS给RRC探头的供电出现异常"},
+(25, 4): {"name": "USS_RRC_AftershocksErr", "desc": "RRC探头余震异常"},
+(25, 5): {"name": "USS_RRS_ OT", "desc": "RRS探头温度故障"},
+(25, 6): {"name": "USS_RRS_ HWErr", "desc": "RRS探头硬件故障"},
+(25, 7): {"name": "USS_RRS_LineErr", "desc": "RRS探头对电池短路或开路或对地短路"},
+(26, 0): {"name": "USS_RRS_DsiERR", "desc": "RRS探头与 ELMOS间的通讯出现异常"},
+(26, 1): {"name": "USS_RRS_VSourceErr", "desc": "ELMOS给RRS探头的供电出现异常"},
+(26, 2): {"name": "USS_RRS_AftershocksErr", "desc": "RRS探头余震异常"},
+(26, 3): {"name": "FVC_Camera _Obscured", "desc": "前视短距摄像头遮挡"},
+(26, 4): {"name": "Front_Around_Camera_Obscured", "desc": "前环视摄像头遮挡"},
+(26, 5): {"name": "Rear_Around_Camera_Obscured", "desc": "后环视摄像头遮挡"},
+(26, 6): {"name": "Left_Around_Camera_Obscured", "desc": "左环视摄像头遮挡"},
+(26, 7): {"name": "Right_Around_Camera_Obscured", "desc": "右环视摄像头遮挡"},
+(27, 0): {"name": "Front_Camera_Fogged", "desc": "前视摄影头起雾"},
+(27, 1): {"name": "Front_Around_Camera_Fogged", "desc": "前环视摄像头起雾"},
+(27, 2): {"name": "Rear_Around_Camera_Fogged", "desc": "后环视摄像头起雾"},
+(27, 3): {"name": "Left_Around_Camera_Fogged", "desc": "左环视摄像头起雾"},
+(27, 4): {"name": "Right_Around_Camera_Fogged", "desc": "右环视摄像头起雾"},
+(27, 5): {"name": "Front_Camera_ReplacementErr", "desc": "前视摄影头换件异常"},
+(27, 6): {"name": "Front_Around_Camera_ReplacementErr", "desc": "前环视摄像头换件异常（8号）"},
+(27, 7): {"name": "Rear_Around_Camera_ReplacementErr", "desc": "后环视摄像头换件异常（11号）"},
+(28, 0): {"name": "Left_Around_Camera_ReplacementErr", "desc": "左环视摄像头换件异常（9号）"},
+(28, 1): {"name": "Right_Around_Camera_ReplacementErr", "desc": "右环视摄像头换件异常（10号）"},
+(28, 2): {"name": "Front_Camera_CalibrationErr", "desc": "前视摄影头标定失败"},
+(28, 3): {"name": "Front_Around_Camera_CalibrationErr", "desc": "前环视摄像头标定失败"},
+(28, 4): {"name": "Rear_Around_Camera_CalibrationErr", "desc": "后环视摄像头标定失败"},
+(28, 5): {"name": "Left_Around_Camera_CalibrationErr", "desc": "左环视摄像头标定失败"},
+(28, 6): {"name": "Right_Around_Camera_CalibrationErr", "desc": "右环视摄像头标定失败"},
+(28, 7): {"name": "", "desc": ""},
+(29, 0): {"name": "SVCLeft_Supply_OV", "desc": "左环视摄像头供电的12V电源过压"},
+(29, 1): {"name": "SVCLeft_Supply_UV", "desc": "给左环视摄像头供电的12V电源欠压"},
+(29, 2): {"name": "SVCLeft_CameraSer_MIPI_RX", "desc": "左环视摄像头的串行器接收sensor发出的MIPI信号发生错误"},
+(29, 3): {"name": "SVCLeft_CameraSer_ERRBn", "desc": "左环视摄像头的sensor XERROR pin脚异常"},
+(29, 4): {"name": "SVCLeft_Camera_Bist", "desc": "左环视摄像头的sensor自检异常"},
+(29, 5): {"name": "SVCLeft_Camera_OT", "desc": "左环视摄像头的温度异常"},
+(29, 6): {"name": "SVCLeft_Sensor_VideoERR", "desc": "摄像头的sensor视屏流行列数据输出异常"},
+(29, 7): {"name": "SVCLeft_Sensor_ClockERR", "desc": "左环视摄像头的sensor时钟异常"},
+(30, 0): {"name": "SVCLeft_InitERR", "desc": "SVCLeft初始化失败"},
+(30, 1): {"name": "SVC_Line_CRCERR", "desc": "MAX96722和Camera模组之间的CRC故障"},
+(30, 2): {"name": "", "desc": ""},
+(30, 3): {"name": "", "desc": ""},
+(30, 4): {"name": "", "desc": ""},
+(30, 5): {"name": "ADM_EPSHSTO_Flg_ERR", "desc": "方向盘执行器握手超时"},
+(30, 6): {"name": "ADM_ECMHSTO_Flg_ERR", "desc": "油门执行器握手超时"},
+(30, 7): {"name": "ADM_EBCMHSTO_Flg_ERR", "desc": "刹车执行器握手超时"},
+(31, 0): {"name": "ADM_VehCfgInvalid_Flg", "desc": "应用层配置字无效"},
+(31, 1): {"name": "", "desc": ""},
+(31, 2): {"name": "", "desc": ""},
+(31, 3): {"name": "", "desc": ""},
+(31, 4): {"name": "", "desc": ""},
+(31, 5): {"name": "F_V_fs_rain_Err", "desc": "降雨检测"},
+(31, 6): {"name": "F_V_fs_fog_Err", "desc": "雾天检测"},
+(31, 7): {"name": "fs_low_sun", "desc": "阳光炫光造成图像失真，太阳处于消失点位置。多见于清晨、傍晚等低太阳高度角场景"},
+(32, 0): {"name": "fs_blur_image", "desc": "当图像能见度下降，导致危险区域（本车道及相邻车道内一定范围）内的目标物无法被完整检测时，将触发此提示"},
+(32, 1): {"name": "fs_partial_blockage", "desc": "因镜头被遮挡，导致能见度降低"},
+(32, 2): {"name": "fs_full_blockage", "desc": "因镜头完全遮挡导致完全丧尸能见度。系统连续50帧未检测到任何边缘特征，恢复过程极快（最长不超过50帧）"},
+(32, 3): {"name": "", "desc": ""},
+(32, 4): {"name": "", "desc": ""},
+(32, 5): {"name": "", "desc": ""},
+(32, 6): {"name": "", "desc": ""},
+(32, 7): {"name": "", "desc": ""},
+(33, 0): {"name": "", "desc": ""},
+(33, 1): {"name": "", "desc": ""},
+(33, 2): {"name": "", "desc": ""},
+(33, 3): {"name": "", "desc": ""},
+(33, 4): {"name": "", "desc": ""},
+(33, 5): {"name": "", "desc": ""},
+(33, 6): {"name": "", "desc": ""},
+(33, 7): {"name": "", "desc": ""},
+(34, 0): {"name": "", "desc": ""},
+(34, 1): {"name": "", "desc": ""},
+(34, 2): {"name": "", "desc": ""},
+(34, 3): {"name": "", "desc": ""},
+(34, 4): {"name": "", "desc": ""},
+(34, 5): {"name": "", "desc": ""},
+(34, 6): {"name": "", "desc": ""},
+(34, 7): {"name": "", "desc": ""},
+(35, 0): {"name": "", "desc": ""},
+(35, 1): {"name": "", "desc": ""},
+(35, 2): {"name": "", "desc": ""},
+(35, 3): {"name": "", "desc": ""},
+(35, 4): {"name": "", "desc": ""},
+(35, 5): {"name": "", "desc": ""},
+(35, 6): {"name": "", "desc": ""},
+(35, 7): {"name": "", "desc": ""},
+(36, 0): {"name": "", "desc": ""},
+(36, 1): {"name": "", "desc": ""},
+(36, 2): {"name": "", "desc": ""},
+(36, 3): {"name": "", "desc": ""},
+(36, 4): {"name": "", "desc": ""},
+(36, 5): {"name": "", "desc": ""},
+(36, 6): {"name": "", "desc": ""},
+(36, 7): {"name": "", "desc": ""},
+(37, 0): {"name": "", "desc": ""},
+(37, 1): {"name": "", "desc": ""},
+(37, 2): {"name": "", "desc": ""},
+(37, 3): {"name": "", "desc": ""},
+(37, 4): {"name": "", "desc": ""},
+(37, 5): {"name": "", "desc": ""},
+(37, 6): {"name": "", "desc": ""},
+(37, 7): {"name": "", "desc": ""},
+(38, 0): {"name": "", "desc": ""},
+(38, 1): {"name": "", "desc": ""},
+(38, 2): {"name": "", "desc": ""},
+(38, 3): {"name": "", "desc": ""},
+(38, 4): {"name": "", "desc": ""},
+(38, 5): {"name": "", "desc": ""},
+(38, 6): {"name": "", "desc": ""},
+(38, 7): {"name": "", "desc": ""},
+(39, 0): {"name": "", "desc": ""},
+(39, 1): {"name": "", "desc": ""},
+(39, 2): {"name": "", "desc": ""},
+(39, 3): {"name": "", "desc": ""},
+(39, 4): {"name": "", "desc": ""},
+(39, 5): {"name": "", "desc": ""},
+(39, 6): {"name": "", "desc": ""},
+(39, 7): {"name": "", "desc": ""},
+(40, 0): {"name": "", "desc": ""},
+(40, 1): {"name": "", "desc": ""},
+(40, 2): {"name": "", "desc": ""},
+(40, 3): {"name": "", "desc": ""},
+(40, 4): {"name": "", "desc": ""},
+(40, 5): {"name": "", "desc": ""},
+(40, 6): {"name": "", "desc": ""},
+(40, 7): {"name": "", "desc": ""},
+(41, 0): {"name": "", "desc": ""},
+(41, 1): {"name": "", "desc": ""},
+(41, 2): {"name": "", "desc": ""},
+(41, 3): {"name": "", "desc": ""},
+(41, 4): {"name": "", "desc": ""},
+(41, 5): {"name": "", "desc": ""},
+(41, 6): {"name": "", "desc": ""},
+(41, 7): {"name": "", "desc": ""},
+(42, 0): {"name": "", "desc": ""},
+(42, 1): {"name": "", "desc": ""},
+(42, 2): {"name": "", "desc": ""},
+(42, 3): {"name": "", "desc": ""},
+(42, 4): {"name": "", "desc": ""},
+(42, 5): {"name": "", "desc": ""},
+(42, 6): {"name": "", "desc": ""},
+(42, 7): {"name": "", "desc": ""},
+(43, 0): {"name": "", "desc": ""},
+(43, 1): {"name": "", "desc": ""},
+(43, 2): {"name": "", "desc": ""},
+(43, 3): {"name": "", "desc": ""},
+(43, 4): {"name": "", "desc": ""},
+(43, 5): {"name": "", "desc": ""},
+(43, 6): {"name": "", "desc": ""},
+(43, 7): {"name": "", "desc": ""},
+(44, 0): {"name": "", "desc": ""},
+(44, 1): {"name": "", "desc": ""},
+(44, 2): {"name": "", "desc": ""},
+(44, 3): {"name": "", "desc": ""},
+(44, 4): {"name": "", "desc": ""},
+(44, 5): {"name": "", "desc": ""},
+(44, 6): {"name": "", "desc": ""},
+(44, 7): {"name": "", "desc": ""},
+(45, 0): {"name": "", "desc": ""},
+(45, 1): {"name": "", "desc": ""},
+(45, 2): {"name": "", "desc": ""},
+(45, 3): {"name": "", "desc": ""},
+(45, 4): {"name": "", "desc": ""},
+(45, 5): {"name": "", "desc": ""},
+(45, 6): {"name": "", "desc": ""},
+(45, 7): {"name": "", "desc": ""},
+(46, 0): {"name": "", "desc": ""},
+(46, 1): {"name": "", "desc": ""},
+(46, 2): {"name": "", "desc": ""},
+(46, 3): {"name": "", "desc": ""},
+(46, 4): {"name": "", "desc": ""},
+(46, 5): {"name": "", "desc": ""},
+(46, 6): {"name": "", "desc": ""},
+(46, 7): {"name": "", "desc": ""},
+(47, 0): {"name": "", "desc": ""},
+(47, 1): {"name": "", "desc": ""},
+(47, 2): {"name": "", "desc": ""},
+(47, 3): {"name": "", "desc": ""},
+(47, 4): {"name": "", "desc": ""},
+(47, 5): {"name": "", "desc": ""},
+(47, 6): {"name": "", "desc": ""},
+(47, 7): {"name": "", "desc": ""},
+(48, 0): {"name": "", "desc": ""},
+(48, 1): {"name": "", "desc": ""},
+(48, 2): {"name": "", "desc": ""},
+(48, 3): {"name": "", "desc": ""},
+(48, 4): {"name": "", "desc": ""},
+(48, 5): {"name": "", "desc": ""},
+(48, 6): {"name": "", "desc": ""},
+(48, 7): {"name": "", "desc": ""},
+(49, 0): {"name": "", "desc": ""},
+(49, 1): {"name": "", "desc": ""},
+(49, 2): {"name": "", "desc": ""},
+(49, 3): {"name": "", "desc": ""},
+(49, 4): {"name": "", "desc": ""},
+(49, 5): {"name": "", "desc": ""},
+(49, 6): {"name": "", "desc": ""},
+(49, 7): {"name": "", "desc": ""},
+(50, 0): {"name": "", "desc": ""},
+(50, 1): {"name": "", "desc": ""},
+(50, 2): {"name": "", "desc": ""},
+(50, 3): {"name": "", "desc": ""},
+(50, 4): {"name": "", "desc": ""},
+(50, 5): {"name": "", "desc": ""},
+(50, 6): {"name": "", "desc": ""},
+(50, 7): {"name": "", "desc": ""},
+(51, 0): {"name": "", "desc": ""},
+(51, 1): {"name": "", "desc": ""},
+(51, 2): {"name": "", "desc": ""},
+(51, 3): {"name": "", "desc": ""},
+(51, 4): {"name": "", "desc": ""},
+(51, 5): {"name": "", "desc": ""},
+(51, 6): {"name": "", "desc": ""},
+(51, 7): {"name": "", "desc": ""},
+(52, 0): {"name": "", "desc": ""},
+(52, 1): {"name": "", "desc": ""},
+(52, 2): {"name": "", "desc": ""},
+(52, 3): {"name": "", "desc": ""},
+(52, 4): {"name": "", "desc": ""},
+(52, 5): {"name": "", "desc": ""},
+(52, 6): {"name": "", "desc": ""},
+(52, 7): {"name": "", "desc": ""},
+(53, 0): {"name": "", "desc": ""},
+(53, 1): {"name": "", "desc": ""},
+(53, 2): {"name": "", "desc": ""},
+(53, 3): {"name": "", "desc": ""},
+(53, 4): {"name": "", "desc": ""},
+(53, 5): {"name": "", "desc": ""},
+(53, 6): {"name": "", "desc": ""},
+(53, 7): {"name": "", "desc": ""},
+(54, 0): {"name": "", "desc": ""},
+(54, 1): {"name": "", "desc": ""},
+(54, 2): {"name": "", "desc": ""},
+(54, 3): {"name": "", "desc": ""},
+(54, 4): {"name": "", "desc": ""},
+(54, 5): {"name": "", "desc": ""},
+(54, 6): {"name": "", "desc": ""},
+(54, 7): {"name": "", "desc": ""},
+(55, 0): {"name": "", "desc": ""},
+(55, 1): {"name": "", "desc": ""},
+(55, 2): {"name": "", "desc": ""},
+(55, 3): {"name": "", "desc": ""},
+(55, 4): {"name": "", "desc": ""},
+(55, 5): {"name": "", "desc": ""},
+(55, 6): {"name": "", "desc": ""},
+(55, 7): {"name": "", "desc": ""},
+(56, 0): {"name": "", "desc": ""},
+(56, 1): {"name": "", "desc": ""},
+(56, 2): {"name": "", "desc": ""},
+(56, 3): {"name": "", "desc": ""},
+(56, 4): {"name": "", "desc": ""},
+(56, 5): {"name": "", "desc": ""},
+(56, 6): {"name": "", "desc": ""},
+(56, 7): {"name": "", "desc": ""},
+(57, 0): {"name": "", "desc": ""},
+(57, 1): {"name": "", "desc": ""},
+(57, 2): {"name": "", "desc": ""},
+(57, 3): {"name": "", "desc": ""},
+(57, 4): {"name": "", "desc": ""},
+(57, 5): {"name": "", "desc": ""},
+(57, 6): {"name": "", "desc": ""},
+(57, 7): {"name": "", "desc": ""},
+(58, 0): {"name": "", "desc": ""},
+(58, 1): {"name": "", "desc": ""},
+(58, 2): {"name": "", "desc": ""},
+(58, 3): {"name": "", "desc": ""},
+(58, 4): {"name": "", "desc": ""},
+(58, 5): {"name": "", "desc": ""},
+(58, 6): {"name": "", "desc": ""},
+(58, 7): {"name": "", "desc": ""},
+(59, 0): {"name": "", "desc": ""},
+(59, 1): {"name": "", "desc": ""},
+(59, 2): {"name": "", "desc": ""},
+(59, 3): {"name": "", "desc": ""},
+(59, 4): {"name": "", "desc": ""},
+(59, 5): {"name": "", "desc": ""},
+(59, 6): {"name": "", "desc": ""},
+(59, 7): {"name": "", "desc": ""},
+(60, 0): {"name": "", "desc": ""},
+(60, 1): {"name": "", "desc": ""},
+(60, 2): {"name": "", "desc": ""},
+(60, 3): {"name": "", "desc": ""},
+(60, 4): {"name": "", "desc": ""},
+(60, 5): {"name": "", "desc": ""},
+(60, 6): {"name": "", "desc": ""},
+(60, 7): {"name": "", "desc": ""},
+(61, 0): {"name": "", "desc": ""},
+(61, 1): {"name": "", "desc": ""},
+(61, 2): {"name": "", "desc": ""},
+(61, 3): {"name": "", "desc": ""},
+(61, 4): {"name": "", "desc": ""},
+(61, 5): {"name": "", "desc": ""},
+(61, 6): {"name": "", "desc": ""},
+(61, 7): {"name": "", "desc": ""},
+(62, 0): {"name": "", "desc": ""},
+(62, 1): {"name": "", "desc": ""},
+(62, 2): {"name": "", "desc": ""},
+(62, 3): {"name": "", "desc": ""},
+(62, 4): {"name": "", "desc": ""},
+(62, 5): {"name": "", "desc": ""},
+(62, 6): {"name": "", "desc": ""},
+(62, 7): {"name": "", "desc": ""},
+(63, 0): {"name": "", "desc": ""},
+(63, 1): {"name": "", "desc": ""},
+(63, 2): {"name": "", "desc": ""},
+(63, 3): {"name": "", "desc": ""},
+(63, 4): {"name": "", "desc": ""},
+(63, 5): {"name": "", "desc": ""},
+(63, 6): {"name": "", "desc": ""},
+(63, 7): {"name": "", "desc": ""},
+(64, 0): {"name": "", "desc": ""},
+(64, 1): {"name": "", "desc": ""},
+(64, 2): {"name": "", "desc": ""},
+(64, 3): {"name": "", "desc": ""},
+(64, 4): {"name": "", "desc": ""},
+(64, 5): {"name": "", "desc": ""},
+(64, 6): {"name": "", "desc": ""},
+(64, 7): {"name": "", "desc": ""},
+(65, 0): {"name": "", "desc": ""},
+(65, 1): {"name": "", "desc": ""},
+(65, 2): {"name": "", "desc": ""},
+(65, 3): {"name": "", "desc": ""},
+(65, 4): {"name": "", "desc": ""},
+(65, 5): {"name": "", "desc": ""},
+(65, 6): {"name": "", "desc": ""},
+(65, 7): {"name": "", "desc": ""},
+(66, 0): {"name": "", "desc": ""},
+(66, 1): {"name": "", "desc": ""},
+(66, 2): {"name": "", "desc": ""},
+(66, 3): {"name": "", "desc": ""},
+(66, 4): {"name": "", "desc": ""},
+(66, 5): {"name": "", "desc": ""},
+(66, 6): {"name": "", "desc": ""},
+(66, 7): {"name": "", "desc": ""},
+(67, 0): {"name": "", "desc": ""},
+(67, 1): {"name": "", "desc": ""},
+(67, 2): {"name": "", "desc": ""},
+(67, 3): {"name": "", "desc": ""},
+(67, 4): {"name": "", "desc": ""},
+(67, 5): {"name": "", "desc": ""},
+(67, 6): {"name": "", "desc": ""},
+(67, 7): {"name": "", "desc": ""},
+(68, 0): {"name": "", "desc": ""},
+(68, 1): {"name": "", "desc": ""},
+(68, 2): {"name": "", "desc": ""},
+(68, 3): {"name": "", "desc": ""},
+(68, 4): {"name": "", "desc": ""},
+(68, 5): {"name": "", "desc": ""},
+(68, 6): {"name": "", "desc": ""},
+(68, 7): {"name": "", "desc": ""},
+(69, 0): {"name": "", "desc": ""},
+(69, 1): {"name": "", "desc": ""},
+(69, 2): {"name": "", "desc": ""},
+(69, 3): {"name": "", "desc": ""},
+(69, 4): {"name": "", "desc": ""},
+(69, 5): {"name": "", "desc": ""},
+(69, 6): {"name": "", "desc": ""},
+(69, 7): {"name": "", "desc": ""},
+(70, 0): {"name": "", "desc": ""},
+(70, 1): {"name": "", "desc": ""},
+(70, 2): {"name": "", "desc": ""},
+(70, 3): {"name": "", "desc": ""},
+(70, 4): {"name": "", "desc": ""},
+(70, 5): {"name": "", "desc": ""},
+(70, 6): {"name": "", "desc": ""},
+(70, 7): {"name": "", "desc": ""},
+(71, 0): {"name": "", "desc": ""},
+(71, 1): {"name": "", "desc": ""},
+(71, 2): {"name": "", "desc": ""},
+(71, 3): {"name": "", "desc": ""},
+(71, 4): {"name": "", "desc": ""},
+(71, 5): {"name": "", "desc": ""},
+(71, 6): {"name": "", "desc": ""},
+(71, 7): {"name": "", "desc": ""},
+(72, 0): {"name": "", "desc": ""},
+(72, 1): {"name": "", "desc": ""},
+(72, 2): {"name": "", "desc": ""},
+(72, 3): {"name": "", "desc": ""},
+(72, 4): {"name": "", "desc": ""},
+(72, 5): {"name": "", "desc": ""},
+(72, 6): {"name": "", "desc": ""},
+(72, 7): {"name": "", "desc": ""},
+(73, 0): {"name": "", "desc": ""},
+(73, 1): {"name": "", "desc": ""},
+(73, 2): {"name": "", "desc": ""},
+(73, 3): {"name": "", "desc": ""},
+(73, 4): {"name": "", "desc": ""},
+(73, 5): {"name": "", "desc": ""},
+(73, 6): {"name": "", "desc": ""},
+(73, 7): {"name": "", "desc": ""},
+(74, 0): {"name": "", "desc": ""},
+(74, 1): {"name": "", "desc": ""},
+(74, 2): {"name": "", "desc": ""},
+(74, 3): {"name": "", "desc": ""},
+(74, 4): {"name": "", "desc": ""},
+(74, 5): {"name": "", "desc": ""},
+(74, 6): {"name": "", "desc": ""},
+(74, 7): {"name": "", "desc": ""},
+(75, 0): {"name": "", "desc": ""},
+(75, 1): {"name": "", "desc": ""},
+(75, 2): {"name": "", "desc": ""},
+(75, 3): {"name": "", "desc": ""},
+(75, 4): {"name": "", "desc": ""},
+(75, 5): {"name": "", "desc": ""},
+(75, 6): {"name": "", "desc": ""},
+(75, 7): {"name": "", "desc": ""},
+(76, 0): {"name": "", "desc": ""},
+(76, 1): {"name": "", "desc": ""},
+(76, 2): {"name": "", "desc": ""},
+(76, 3): {"name": "", "desc": ""},
+(76, 4): {"name": "", "desc": ""},
+(76, 5): {"name": "", "desc": ""},
+(76, 6): {"name": "", "desc": ""},
+(76, 7): {"name": "", "desc": ""},
+(77, 0): {"name": "", "desc": ""},
+(77, 1): {"name": "", "desc": ""},
+(77, 2): {"name": "", "desc": ""},
+(77, 3): {"name": "", "desc": ""},
+(77, 4): {"name": "", "desc": ""},
+(77, 5): {"name": "", "desc": ""},
+(77, 6): {"name": "", "desc": ""},
+(77, 7): {"name": "", "desc": ""},
+(78, 0): {"name": "", "desc": ""},
+(78, 1): {"name": "", "desc": ""},
+(78, 2): {"name": "", "desc": ""},
+(78, 3): {"name": "", "desc": ""},
+(78, 4): {"name": "", "desc": ""},
+(78, 5): {"name": "", "desc": ""},
+(78, 6): {"name": "", "desc": ""},
+(78, 7): {"name": "", "desc": ""},
+(79, 0): {"name": "", "desc": ""},
+(79, 1): {"name": "", "desc": ""},
+(79, 2): {"name": "", "desc": ""},
+(79, 3): {"name": "", "desc": ""},
+(79, 4): {"name": "", "desc": ""},
+(79, 5): {"name": "", "desc": ""},
+(79, 6): {"name": "", "desc": ""},
+(79, 7): {"name": "", "desc": ""},
+(80, 0): {"name": "", "desc": ""},
+(80, 1): {"name": "", "desc": ""},
+(80, 2): {"name": "", "desc": ""},
+(80, 3): {"name": "", "desc": ""},
+(80, 4): {"name": "", "desc": ""},
+(80, 5): {"name": "", "desc": ""},
+(80, 6): {"name": "", "desc": ""},
+(80, 7): {"name": "", "desc": ""},
+(81, 0): {"name": "", "desc": ""},
+(81, 1): {"name": "", "desc": ""},
+(81, 2): {"name": "", "desc": ""},
+(81, 3): {"name": "", "desc": ""},
+(81, 4): {"name": "", "desc": ""},
+(81, 5): {"name": "", "desc": ""},
+(81, 6): {"name": "", "desc": ""},
+(81, 7): {"name": "", "desc": ""},
+(82, 0): {"name": "", "desc": ""},
+(82, 1): {"name": "", "desc": ""},
+(82, 2): {"name": "", "desc": ""},
+(82, 3): {"name": "", "desc": ""},
+(82, 4): {"name": "", "desc": ""},
+(82, 5): {"name": "", "desc": ""},
+(82, 6): {"name": "", "desc": ""},
+(82, 7): {"name": "", "desc": ""},
+(83, 0): {"name": "", "desc": ""},
+(83, 1): {"name": "", "desc": ""},
+(83, 2): {"name": "", "desc": ""},
+(83, 3): {"name": "", "desc": ""},
+(83, 4): {"name": "", "desc": ""},
+(83, 5): {"name": "", "desc": ""},
+(83, 6): {"name": "", "desc": ""},
+(83, 7): {"name": "", "desc": ""},
+(84, 0): {"name": "", "desc": ""},
+(84, 1): {"name": "", "desc": ""},
+(84, 2): {"name": "", "desc": ""},
+(84, 3): {"name": "", "desc": ""},
+(84, 4): {"name": "", "desc": ""},
+(84, 5): {"name": "", "desc": ""},
+(84, 6): {"name": "", "desc": ""},
+(84, 7): {"name": "", "desc": ""},
+(85, 0): {"name": "", "desc": ""},
+(85, 1): {"name": "", "desc": ""},
+(85, 2): {"name": "", "desc": ""},
+(85, 3): {"name": "", "desc": ""},
+(85, 4): {"name": "", "desc": ""},
+(85, 5): {"name": "", "desc": ""},
+(85, 6): {"name": "", "desc": ""},
+(85, 7): {"name": "", "desc": ""},
+(86, 0): {"name": "", "desc": ""},
+(86, 1): {"name": "", "desc": ""},
+(86, 2): {"name": "", "desc": ""},
+(86, 3): {"name": "", "desc": ""},
+(86, 4): {"name": "", "desc": ""},
+(86, 5): {"name": "", "desc": ""},
+(86, 6): {"name": "", "desc": ""},
+(86, 7): {"name": "", "desc": ""},
+(87, 0): {"name": "", "desc": ""},
+(87, 1): {"name": "", "desc": ""},
+(87, 2): {"name": "", "desc": ""},
+(87, 3): {"name": "", "desc": ""},
+(87, 4): {"name": "", "desc": ""},
+(87, 5): {"name": "", "desc": ""},
+(87, 6): {"name": "", "desc": ""},
+(87, 7): {"name": "", "desc": ""},
+(88, 0): {"name": "", "desc": ""},
+(88, 1): {"name": "", "desc": ""},
+(88, 2): {"name": "", "desc": ""},
+(88, 3): {"name": "", "desc": ""},
+(88, 4): {"name": "", "desc": ""},
+(88, 5): {"name": "", "desc": ""},
+(88, 6): {"name": "", "desc": ""},
+(88, 7): {"name": "", "desc": ""},
+(89, 0): {"name": "", "desc": ""},
+(89, 1): {"name": "", "desc": ""},
+(89, 2): {"name": "", "desc": ""},
+(89, 3): {"name": "", "desc": ""},
+(89, 4): {"name": "", "desc": ""},
+(89, 5): {"name": "", "desc": ""},
+(89, 6): {"name": "", "desc": ""},
+(89, 7): {"name": "", "desc": ""},
+(90, 0): {"name": "", "desc": ""},
+(90, 1): {"name": "", "desc": ""},
+(90, 2): {"name": "", "desc": ""},
+(90, 3): {"name": "", "desc": ""},
+(90, 4): {"name": "", "desc": ""},
+(90, 5): {"name": "", "desc": ""},
+(90, 6): {"name": "", "desc": ""},
+(90, 7): {"name": "", "desc": ""},
+(91, 0): {"name": "", "desc": ""},
+(91, 1): {"name": "", "desc": ""},
+(91, 2): {"name": "", "desc": ""},
+(91, 3): {"name": "", "desc": ""},
+(91, 4): {"name": "", "desc": ""},
+(91, 5): {"name": "", "desc": ""},
+(91, 6): {"name": "", "desc": ""},
+(91, 7): {"name": "", "desc": ""},
+(92, 0): {"name": "", "desc": ""},
+(92, 1): {"name": "", "desc": ""},
+(92, 2): {"name": "", "desc": ""},
+(92, 3): {"name": "", "desc": ""},
+(92, 4): {"name": "", "desc": ""},
+(92, 5): {"name": "", "desc": ""},
+(92, 6): {"name": "", "desc": ""},
+(92, 7): {"name": "", "desc": ""},
+(93, 0): {"name": "", "desc": ""},
+(93, 1): {"name": "", "desc": ""},
+(93, 2): {"name": "", "desc": ""},
+(93, 3): {"name": "", "desc": ""},
+(93, 4): {"name": "", "desc": ""},
+(93, 5): {"name": "", "desc": ""},
+(93, 6): {"name": "", "desc": ""},
+(93, 7): {"name": "", "desc": ""},
+(94, 0): {"name": "", "desc": ""},
+(94, 1): {"name": "", "desc": ""},
+(94, 2): {"name": "", "desc": ""},
+(94, 3): {"name": "", "desc": ""},
+(94, 4): {"name": "", "desc": ""},
+(94, 5): {"name": "", "desc": ""},
+(94, 6): {"name": "", "desc": ""},
+(94, 7): {"name": "", "desc": ""},
+(95, 0): {"name": "", "desc": ""},
+(95, 1): {"name": "", "desc": ""},
+(95, 2): {"name": "", "desc": ""},
+(95, 3): {"name": "", "desc": ""},
+(95, 4): {"name": "", "desc": ""},
+(95, 5): {"name": "", "desc": ""},
+(95, 6): {"name": "", "desc": ""},
+(95, 7): {"name": "", "desc": ""},
+(96, 0): {"name": "", "desc": ""},
+(96, 1): {"name": "", "desc": ""},
+(96, 2): {"name": "", "desc": ""},
+(96, 3): {"name": "", "desc": ""},
+(96, 4): {"name": "", "desc": ""},
+(96, 5): {"name": "", "desc": ""},
+(96, 6): {"name": "", "desc": ""},
+(96, 7): {"name": "", "desc": ""},
+(97, 0): {"name": "", "desc": ""},
+(97, 1): {"name": "", "desc": ""},
+(97, 2): {"name": "", "desc": ""},
+(97, 3): {"name": "", "desc": ""},
+(97, 4): {"name": "", "desc": ""},
+(97, 5): {"name": "", "desc": ""},
+(97, 6): {"name": "", "desc": ""},
+(97, 7): {"name": "", "desc": ""},
+(98, 0): {"name": "", "desc": ""},
+(98, 1): {"name": "CPU0_AvgLoad_HIGH", "desc": "CPU0的负载率过高"},
+(98, 2): {"name": "CPU1_AvgLoad_HIGH", "desc": "CPU1的负载率过高"},
+(98, 3): {"name": "MPQ70170_OW", "desc": "70170芯片结温超过热警告阈值125℃"},
+(98, 4): {"name": "MPQ2286_OT", "desc": "2286 芯片结温超过热警告阈值125℃"},
+(98, 5): {"name": "MPQ2284_OT", "desc": "2284芯片结温超过热警告阈值125℃"},
+(98, 6): {"name": "DDR_TEMPErr", "desc": "DDR芯片温度异常，超过DDR芯片的工作范围，DDR芯片工作范围（-40℃，+110℃）"},
+(98, 7): {"name": "eMMC_TEMPErr", "desc": "EMMC芯片温度异常，超过EMMC芯片的工作范围，DDR芯片工作范围（-40℃，+110℃）"},
+(99, 0): {"name": "NOC_TempErr", "desc": "J6芯片NOC的温度过高，超过115℃"},
+(99, 1): {"name": "MCU_BPU_TempErr", "desc": "J6芯片MCU与BPU交界处的温度过高，超过115℃"},
+(99, 2): {"name": "MCU_DDR_TempErr", "desc": "J6芯片MCU与DDR交界处温度过高，超过115℃"},
+(99, 3): {"name": "KL30_ADErr过压", "desc": "KL30供电电压大于16V故障"},
+(99, 4): {"name": "KL30_ADErr欠压", "desc": "KL30供电电压小于9V故障"},
+(99, 5): {"name": "DES_1V8_ADErr", "desc": "DES_1V8_AD电压异常，不在（1.7，1.9）V之间"},
+(99, 6): {"name": "DES_1V2_ADErr", "desc": "DES_1V2_AD电压异常，不在（1.1 ， 1.3）V之间"},
+(99, 7): {"name": "VPRE_3V6_ADErr", "desc": "VPRE_3V6_AD电压异常，不在（3.4 ， 3.8）V之间"},
+(100, 0): {"name": "J6MCU_ADC_BOOST_12VADErr", "desc": "J6MCU_ADC_BOOST_12VAD电压异常,不在（11.4 ， 12.6）V之间"},
+(100, 1): {"name": "VPRE_SYS_3V6_ADErr", "desc": "VPRE_SYS_3V6_AD电压异常，不在（3.4 ， 3.8）V之间"},
+(100, 2): {"name": "VBOOST5V_ADErr", "desc": "VBOOST5V_AD电压异常，不在（4.7，5.3）V之间"},
+(100, 3): {"name": "", "desc": ""},
+(100, 4): {"name": "", "desc": ""},
+(100, 5): {"name": "U33_A1OT", "desc": "77240A（U33）芯片A1口温度过高超过175℃"},
+(100, 6): {"name": "U33_A2OT", "desc": "77240A（U33）芯片A2口温度过高超过175℃"},
+(100, 7): {"name": "U33_B1OT", "desc": "77240A（U33）芯片B1口温度过高超过175℃"},
+(101, 0): {"name": "U36_A1OT", "desc": "77240B（U36）芯片A1口温度过高超过175℃"},
+(101, 1): {"name": "U36_A2OT", "desc": "77240B（U36）芯片A2口温度过高超过175℃"},
+(101, 2): {"name": "U36_B1OT", "desc": "77240B（U36）芯片B1口温度过高超过175℃"},
+(101, 3): {"name": "U36_B2OT", "desc": "77240B（U36）芯片B2口温度过高超过175℃"},
+(101, 4): {"name": "U37_A1OT", "desc": "77240C（U37）芯片A1口温度过高超过175℃"},
+(101, 5): {"name": "U37_B1OT", "desc": "77240C（U37）芯片B2口温度过高超过175℃"},
+(101, 6): {"name": "U33_A1VoltageErr", "desc": "77240A（U33）芯片A1口输出电压过低，小于11V"},
+(101, 7): {"name": "U33_A2VoltageErr", "desc": "77240A（U33）芯片A2口输出电压过低，小于11V"},
+(102, 0): {"name": "U33_B1VoltageErr", "desc": "77240A（U33）芯片B1口输出电压过低，小于11V"},
+(102, 1): {"name": "U36_A1VoltageErr", "desc": "77240B（U36）芯片A1口输出电压过低，小于11V"},
+(102, 2): {"name": "U36_A2VoltageErr", "desc": "77240A（U36）芯片A2口输出电压过低，小于11V"},
+(102, 3): {"name": "U36_B1VoltageErr", "desc": "77240A（U36）芯片B1口输出电压过低，小于11V"},
+(102, 4): {"name": "U36_B2VoltageErr", "desc": "77240A（U36）芯片B2口输出电压过低，小于11V"},
+(102, 5): {"name": "U37_A1VoltageErr", "desc": "77240C（U37）芯片A1口输出电压过低，小于11V"},
+(102, 6): {"name": "U37_B1VoltageErr", "desc": "77240C（U37）芯片B1口输出电压过低，小于11V"},
+(102, 7): {"name": "2286_VOUT_OV_FAULT", "desc": "2286芯片输出电压值过高"},
+(103, 0): {"name": "2286_VOUT_UV_FAULT", "desc": "2286芯片输出电压值过低"},
+(103, 1): {"name": "2286_PGOOD", "desc": "2286电源PG状态异常"},
+(103, 2): {"name": "2284_VOUT_OV_FAULT", "desc": "2284芯片输出电压值过高"},
+(103, 3): {"name": "2284_VOUT_UV_FAULT", "desc": "2284芯片输出电压值过低"},
+(103, 4): {"name": "2284_PGOOD", "desc": "2284电源PG状态异常"},
+(103, 5): {"name": "4232_VOUT_OV_FAULT", "desc": "4232输出电压过高"},
+(103, 6): {"name": "4232_ OT_WARNING", "desc": "4232芯片温度过高"},
+(103, 7): {"name": "4232_PG_STATUS", "desc": "4232PG状态"},
+(104, 0): {"name": "5857_TW", "desc": "5857芯片温度过高"},
+(104, 1): {"name": "5857_UV", "desc": "5857芯片输出电压过低"},
+(104, 2): {"name": "5857_OV", "desc": "5857芯片输出电压过高"},
+(104, 3): {"name": "70170_BUCK1_OC", "desc": "70170芯片BUCK1口输出电流过高"},
+(104, 4): {"name": "70170_BUCK1_UV", "desc": "70170芯片BUCK1口输出电压欠压"},
+(104, 5): {"name": "70170_BUCK1_OV", "desc": "70170芯片BUCK1口输出电压过高"},
+(104, 6): {"name": "70170_BUCK2_OC", "desc": "70170芯片BUCK2口输出电流过高"},
+(104, 7): {"name": "70170_BUCK2_UV", "desc": "70170芯片BUCK2口输出电压欠压"},
+(105, 0): {"name": "70170_BUCK2_OV", "desc": "70170芯片BUCK2口输出电压过高"},
+(105, 1): {"name": "70170_BUCK3_OC", "desc": "70170芯片BUCK3口输出电流过高"},
+(105, 2): {"name": "70170_BUCK3_UV", "desc": "70170芯片BUCK3口输出电压欠压"},
+(105, 3): {"name": "70170_BUCK3_OV", "desc": "70170芯片BUCK3口输出电压过高"},
+(105, 4): {"name": "70170_BUCK4_OC", "desc": "70170芯片BUCK4口输出电流过高"},
+(105, 5): {"name": "70170_BUCK4_UV", "desc": "70170芯片BUCK4口输出电压欠压"},
+(105, 6): {"name": "70170_BUCK4_OV", "desc": "70170芯片BUCK4口输出电压过高"},
+(105, 7): {"name": "70170_BUCK5_OC", "desc": "70170芯片BUCK5口输出电流过高"},
+(106, 0): {"name": "70170_BUCK5_UV", "desc": "70170芯片BUCK5口输出电压欠压"},
+(106, 1): {"name": "70170_BUCK5_OV", "desc": "70170芯片BUCK5口输出电压过高"},
+(106, 2): {"name": "70170_LDO3_UV", "desc": "70170芯片LDO3口输出电流过高"},
+(106, 3): {"name": "70170_LDO3_OV", "desc": "70170芯片LDO3口输出电压欠压"},
+(106, 4): {"name": "70170_LDO3_OC", "desc": "70170芯片LDO3口输出电压过高"},
+(106, 5): {"name": "70170_LDO4_UV", "desc": "70170芯片LDO4口输出电流过高"},
+(106, 6): {"name": "70170_LDO4_OV", "desc": "70170芯片LDO4口输出电压欠压"},
+(106, 7): {"name": "70170_LDO4_OC", "desc": "70170芯片LDO4口输出电压过高"},
+(107, 0): {"name": "96716A_SOC_DMSERR（只在低配有）", "desc": "96716A连接的DMS错误（只在低配有）"},
+(107, 1): {"name": "96716A_SOC_LOCK", "desc": "96716A芯片LOCk状态"},
+(107, 2): {"name": "96716A_SOC_ERRBn", "desc": "96716A芯片ERRBn状态"},
+(107, 3): {"name": "96716A_SOC_FCMERR", "desc": "96716A连接的FCM错误"},
+(107, 4): {"name": "722_SOC_LOCK", "desc": "96722芯片LOCk状态"},
+(107, 5): {"name": "722_SOC_ERRBn", "desc": "96722芯片ERRBn状态"},
+(107, 6): {"name": "722_SOC_CAM1ERR", "desc": "96722芯片连接的环视右故障"},
+(107, 7): {"name": "722_SOC_CAM2ERR", "desc": "96722芯片连接的环视后故障"},
+(108, 0): {"name": "722_SOC_CAM3ERR", "desc": "96722芯片连接的环视前故障"},
+(108, 1): {"name": "722_SOC_CAM4ERR", "desc": "96722芯片连接的环视左故障"},
+(108, 2): {"name": "717A_SOC_LOCK", "desc": "96717（U14）芯片lock状态"},
+(108, 3): {"name": "717A_SOC_ERRBn", "desc": "96717（U14）芯片ERRBn状态"},
+(108, 4): {"name": "717B_SOC_LOCK", "desc": "96717（U15）芯片lock状态"},
+(108, 5): {"name": "717B_SOC_ERRBn", "desc": "96717（U15）芯片ERRBn状态"},
+(108, 6): {"name": "DVR717_SOC_LOCK（只有高配有）", "desc": "96717（U28）芯片lock状态"},
+(108, 7): {"name": "DVR717_SOC_ERRBn（只有高配有）", "desc": "96717（U28）芯片ERRBn状态"},
+(109, 0): {"name": "953_SOC_LOCK（只有低配有）", "desc": "953芯片的LOCK状态"},
+(109, 1): {"name": "953_SOC_ERRBn（只有低配有）", "desc": "953芯片的ERRBn状态"},
+(109, 2): {"name": "", "desc": ""},
+(109, 3): {"name": "", "desc": ""},
+(109, 4): {"name": "USS_MCU_INT", "desc": "J6B数字量输入：\nUSS_MCU_INT信号异常"},
+(109, 5): {"name": "", "desc": ""},
+(109, 6): {"name": "MCU_PWR_ERR", "desc": ""},
+(109, 7): {"name": "", "desc": ""},
+(110, 0): {"name": "", "desc": ""},
+(110, 1): {"name": "4232A_MCU_ALT", "desc": "J6B数字量输入：\n4232A_MCU_ALT信号异常"},
+(110, 2): {"name": "USSHSD_J6MCU_FT", "desc": "J6B数字量输入：\nUSSHSD_J6MCU_FT信号异常"},
+(110, 3): {"name": "MCU_ELMOS1_DAB", "desc": "J6B数字量输入：\nMCU_ELMOS1_DAB信号异常"},
+(110, 4): {"name": "MCU_ELMOS2_DAB", "desc": "J6B数字量输入：\nMCU_ELMOS2_DAB信号异常"},
+(110, 5): {"name": "MCU_ELMOS1_RFC", "desc": "J6B数字量输入：\nMCU_ELMOS1_RFC信号异常"},
+(110, 6): {"name": "MCU_ELMOS2_RFC", "desc": "J6B数字量输入：\nMCU_ELMOS2_RFC信号异常"},
+(110, 7): {"name": "", "desc": ""},
+(111, 0): {"name": "", "desc": ""},
+(111, 1): {"name": "5857B_MCU_PG", "desc": "J6B数字量输入：\n5857B_MCU_PG信号异常"},
+(111, 2): {"name": "5857A_MCU_PG", "desc": "J6B数字量输入：\n5857A_MCU_PG信号异常"},
+(111, 3): {"name": "SER_1V8_PG", "desc": "J6B数字量输入：\nSER_1V8_PG信号异常"},
+(111, 4): {"name": "SER_1V2_PG", "desc": "J6B数字量输入：\nSER_1V2_PG信号异常"},
+(111, 5): {"name": "", "desc": ""},
+(111, 6): {"name": "", "desc": ""},
+(111, 7): {"name": "9296_SOC_DMSERR", "desc": "J6B数字量输入：\n9296_SOC_DMSERR信号异常"},
+(112, 0): {"name": "AVM_SOC_ERRB", "desc": "J6B数字量输入：\nAVM_SOC_ERRB信号异常"},
+(112, 1): {"name": "DVR_SOC_ERRB", "desc": "J6B数字量输入：\nDVR_SOC_ERRB信号异常"},
+(112, 2): {"name": "", "desc": ""},
+(112, 3): {"name": "717AB_SOC_ERRB", "desc": "J6B数字量输入：\n717AB_SOC_ERRB信号异常"},
+(112, 4): {"name": "1103_SOC_INTn", "desc": "J6B数字量输入：\n1103_SOC_INTn信号异常"},
+(112, 5): {"name": "U33_A1_OV", "desc": "77240A（U33）A1输出过压"},
+(112, 6): {"name": "U33_A2_OV", "desc": "77240A（U33）A2输出过压"},
+(112, 7): {"name": "U33_B1_OV", "desc": "77240A（U33）B1输出过压"},
+(113, 0): {"name": "U33_VINA_OV", "desc": "77240A（U33）VINA口过压"},
+(113, 1): {"name": "U33_VINA_UV", "desc": "77240A（U33）VINA口欠压"},
+(113, 2): {"name": "U33_VINB_OV", "desc": "77240A（U33）VINB口过压"},
+(113, 3): {"name": "U33_VINB_UV", "desc": "77240A（U33）VINB口欠压"},
+(113, 4): {"name": "U36_A1_OV", "desc": "77240B（U36）A1输出过压"},
+(113, 5): {"name": "U36_A2_OV", "desc": "77240B（U36）A2输出过压"},
+(113, 6): {"name": "U36_B1_OV", "desc": "77240B（U36）B1输出过压"},
+(113, 7): {"name": "U36_B2_OV", "desc": "77240B（U36）B2输出过压"},
+(114, 0): {"name": "U36_VINA_OV", "desc": "77240B（U36）VINA口过压"},
+(114, 1): {"name": "U36_VINA_UV", "desc": "77240B（U36）VINA口欠压"},
+(114, 2): {"name": "U36_VINB_OV", "desc": "77240B（U36）VINB口过压"},
+(114, 3): {"name": "U36_VINB_UV", "desc": "77240B（U36）VINB口欠压"},
+(114, 4): {"name": "U37_A1_OV", "desc": "77240C（U37）A1输出过压"},
+(114, 5): {"name": "U37_B1_OV（只有低配有该故障，高配默认无故障）", "desc": "77240C（U37）A1输出过压"},
+(114, 6): {"name": "U37_VINA_OV", "desc": "77240C（U37）VINA口过压"},
+(114, 7): {"name": "U37_VINA_UV", "desc": "77240C（U37）VINA口欠压"},
+(115, 0): {"name": "U37_VINB_OV（只有低配有该故障，高配默认无故障）", "desc": "77240C（U37）VINB口过压"},
+(115, 1): {"name": "U37_VINB_UV（只有低配有该故障，高配默认无故障）", "desc": "77240C（U37）VINB口欠压"},
+(115, 2): {"name": "77240_OTPCRC", "desc": "77240(U37)的OTP CRC以及Analog Built-In Self-Test"},
+(115, 3): {"name": "77240_Bandgap Cross Check", "desc": "77240(U37)的BandgapCrossCheck"},
+(115, 4): {"name": "77240_DigitalClockMonitoring", "desc": "77240(U37)的Digital Clock Monitoring"},
+(115, 5): {"name": "77240_ABIST", "desc": "77240(U37)的ABIST"},
+(115, 6): {"name": "77240_B1SC", "desc": "77240(U37)的B1口SC"},
+(115, 7): {"name": "77240_A1SC", "desc": "77240(U37)的A1口SC"},
+(116, 0): {"name": "77240A_OTPCRC", "desc": "77240A(U33)的OTP CRC"},
+(116, 1): {"name": "77240A_BandgapCrossCheck", "desc": "77240A(U33)的BandgapCrossCheck"},
+(116, 2): {"name": "77240A_DigitalClockMonitoring", "desc": "77240A(U33)的Digital Clock Monitoring"},
+(116, 3): {"name": "77240A_ABIST", "desc": "77240A(U33)的ABIST"},
+(116, 4): {"name": "77240A_B1SC", "desc": "77240A(U33)的B1口SC"},
+(116, 5): {"name": "77240A_A1SC", "desc": "77240A(U33)的A1口SC"},
+(116, 6): {"name": "", "desc": ""},
+(116, 7): {"name": "", "desc": ""},
+(117, 0): {"name": "", "desc": ""},
+(117, 1): {"name": "", "desc": ""},
+(117, 2): {"name": "", "desc": ""},
+(117, 3): {"name": "", "desc": ""},
+(117, 4): {"name": "", "desc": ""},
+(117, 5): {"name": "", "desc": ""},
+(117, 6): {"name": "", "desc": ""},
+(117, 7): {"name": "", "desc": ""},
+(118, 0): {"name": "", "desc": ""},
+(118, 1): {"name": "", "desc": ""},
+(118, 2): {"name": "", "desc": ""},
+(118, 3): {"name": "", "desc": ""},
+(118, 4): {"name": "", "desc": ""},
+(118, 5): {"name": "", "desc": ""},
+(118, 6): {"name": "", "desc": ""},
+(118, 7): {"name": "", "desc": ""},
+(119, 0): {"name": "", "desc": ""},
+(119, 1): {"name": "", "desc": ""},
+(119, 2): {"name": "", "desc": ""},
+(119, 3): {"name": "", "desc": ""},
+(119, 4): {"name": "", "desc": ""},
+(119, 5): {"name": "", "desc": ""},
+(119, 6): {"name": "", "desc": ""},
+(119, 7): {"name": "", "desc": ""},
+(120, 0): {"name": "", "desc": ""},
+(120, 1): {"name": "", "desc": ""},
+(120, 2): {"name": "", "desc": ""},
+(120, 3): {"name": "", "desc": ""},
+(120, 4): {"name": "", "desc": ""},
+(120, 5): {"name": "", "desc": ""},
+(120, 6): {"name": "", "desc": ""},
+(120, 7): {"name": "", "desc": ""},
+(121, 0): {"name": "", "desc": ""},
+(121, 1): {"name": "", "desc": ""},
+(121, 2): {"name": "", "desc": ""},
+(121, 3): {"name": "", "desc": ""},
+(121, 4): {"name": "", "desc": ""},
+(121, 5): {"name": "", "desc": ""},
+(121, 6): {"name": "", "desc": ""},
+(121, 7): {"name": "", "desc": ""},
+(122, 0): {"name": "", "desc": ""},
+(122, 1): {"name": "", "desc": ""},
+(122, 2): {"name": "", "desc": ""},
+(122, 3): {"name": "", "desc": ""},
+(122, 4): {"name": "", "desc": ""},
+(122, 5): {"name": "", "desc": ""},
+(122, 6): {"name": "", "desc": ""},
+(122, 7): {"name": "", "desc": ""},
+(123, 0): {"name": "", "desc": ""},
+(123, 1): {"name": "", "desc": ""},
+(123, 2): {"name": "", "desc": ""},
+(123, 3): {"name": "", "desc": ""},
+(123, 4): {"name": "", "desc": ""},
+(123, 5): {"name": "", "desc": ""},
+(123, 6): {"name": "", "desc": ""},
+(123, 7): {"name": "", "desc": ""},
+(124, 0): {"name": "", "desc": ""},
+(124, 1): {"name": "", "desc": ""},
+(124, 2): {"name": "", "desc": ""},
+(124, 3): {"name": "", "desc": ""},
+(124, 4): {"name": "", "desc": ""},
+(124, 5): {"name": "", "desc": ""},
+(124, 6): {"name": "", "desc": ""},
+(124, 7): {"name": "", "desc": ""},
+(125, 0): {"name": "", "desc": ""},
+(125, 1): {"name": "", "desc": ""},
+(125, 2): {"name": "", "desc": ""},
+(125, 3): {"name": "", "desc": ""},
+(125, 4): {"name": "", "desc": ""},
+(125, 5): {"name": "", "desc": ""},
+(125, 6): {"name": "", "desc": ""},
+(125, 7): {"name": "", "desc": ""},
+(126, 0): {"name": "", "desc": ""},
+(126, 1): {"name": "LIN1BussOFF", "desc": ""},
+(126, 2): {"name": "ETH_Link_down", "desc": "发生网卡link down事件"},
+(126, 3): {"name": "TSR_J6B_01", "desc": "ModuleID&EventID:0x00010x0001 IP:mipi_rx0;mipi_phy Level: Cf"},
+(126, 4): {"name": "TSR_J6B_02", "desc": "ModuleID&EventID:0x00010x0002 IP:mipi_rx0;mipi_phy Level: Ncf"},
+(126, 5): {"name": "TSR_J6B_03", "desc": "ModuleID&EventID:0x00020x0001 IP:mipi_rx4;mipi_phy Level: Cf"},
+(126, 6): {"name": "TSR_J6B_04", "desc": "ModuleID&EventID:0x00020x0002 IP:mipi_rx4;mipi_phy Level: Ncf"},
+(126, 7): {"name": "TSR_J6B_05", "desc": "ModuleID&EventID:0x00030x0002 IP:mipi_tx0 mipi_tx_phy Level: Ncf"},
+(127, 0): {"name": "TSR_J6B_06", "desc": "ModuleID&EventID:0x00040x0002 IP:idu Level: Ncf"},
+(127, 1): {"name": "TSR_J6B_07", "desc": "ModuleID&EventID:0x00050x0001 IP:cim0 Level: Cf"},
+(127, 2): {"name": "TSR_J6B_08", "desc": "ModuleID&EventID:0x00050x0002 IP:cim0 Level: Ncf"},
+(127, 3): {"name": "TSR_J6B_09", "desc": "ModuleID&EventID:0x00060x0001 IP:cim4 Level: Cf"},
+(127, 4): {"name": "TSR_J6B_10", "desc": "ModuleID&EventID:0x00060x0002 IP:cim4 Level: Ncf"},
+(127, 5): {"name": "TSR_J6B_11", "desc": "ModuleID&EventID:0x00070x0002 IP:isp0 Level: Ncf"},
+(127, 6): {"name": "TSR_J6B_12", "desc": "ModuleID&EventID:0x00080x0001 IP:gdc Level: Cf"},
+(127, 7): {"name": "TSR_J6B_13", "desc": "ModuleID&EventID:0x00080x0002 IP:gdc Level: Ncf"},
+(128, 0): {"name": "TSR_J6B_14", "desc": "ModuleID&EventID:0x00090x0001 IP:pym0 Level: Cf"},
+(128, 1): {"name": "TSR_J6B_15", "desc": "ModuleID&EventID:0x00090x0002 IP:pym0 Level: Ncf"},
+(128, 2): {"name": "TSR_J6B_16", "desc": "ModuleID&EventID:0x000a0x0001 IP:pym4 Level: Cf"},
+(128, 3): {"name": "TSR_J6B_17", "desc": "ModuleID&EventID:0x000a0x0002 IP:pym4 Level: Ncf"},
+(128, 4): {"name": "TSR_J6B_18", "desc": "ModuleID&EventID:0x000b0x0002 IP:vdsp0 Level: Ncf"},
+(128, 5): {"name": "TSR_J6B_19", "desc": "ModuleID&EventID:0x000c0x0001 IP:Cortex-520AE & DSU Level: Cf"},
+(128, 6): {"name": "TSR_J6B_20", "desc": "ModuleID&EventID:0x000d0x0001 IP:gpio Level: Cf"},
+(128, 7): {"name": "TSR_J6B_21", "desc": "ModuleID&EventID:0x000e0x0001 IP:lpwm Level: Cf"},
+(129, 0): {"name": "TSR_J6B_22", "desc": "ModuleID&EventID:0x000f0x0001 IP:i2c0 Level: Cf"},
+(129, 1): {"name": "TSR_J6B_23", "desc": "ModuleID&EventID:0x00100x0001 IP:i2c1 Level: Cf"},
+(129, 2): {"name": "TSR_J6B_24", "desc": "ModuleID&EventID:0x00110x0001 IP:i2c2 Level: Cf"},
+(129, 3): {"name": "TSR_J6B_25", "desc": "ModuleID&EventID:0x00120x0001 IP:i2c3 Level: Cf"},
+(129, 4): {"name": "TSR_J6B_26", "desc": "ModuleID&EventID:0x00150x0001 IP:uart0 Level: Cf"},
+(129, 5): {"name": "TSR_J6B_27", "desc": "ModuleID&EventID:0x00160x0002 IP:eth1 Level: Ncf"},
+(129, 6): {"name": "TSR_J6B_28", "desc": "ModuleID&EventID:0x00170x0001 IP:sd/mmc Level: Cf"},
+(129, 7): {"name": "TSR_J6B_29", "desc": "ModuleID&EventID:0x00170x0002 IP:sd/mmc Level: Ncf"},
+(130, 0): {"name": "TSR_J6B_30", "desc": "ModuleID&EventID:0x00180x0001 IP:QNX process wwdt Level: Cf"},
+(130, 1): {"name": "TSR_J6B_31", "desc": "ModuleID&EventID:0x001b0x0001 IP:sysreg pinctrl Level: Cf"},
+(130, 2): {"name": "TSR_J6B_32", "desc": "ModuleID&EventID:0x001c0x0001 IP:spinlock Level: Cf"},
+(130, 3): {"name": "TSR_J6B_33", "desc": "ModuleID&EventID:0x001d0x0001 IP:Lite-MMU Level: Cf"},
+(130, 4): {"name": "TSR_J6B_34", "desc": "ModuleID&EventID:0x001e0x0001 IP:noc Level: Cf"},
+(130, 5): {"name": "TSR_J6B_35", "desc": "ModuleID&EventID:0x001f0x0001 IP:ipc Level: Cf"},
+(130, 6): {"name": "TSR_J6B_36", "desc": "ModuleID&EventID:0x00200x0001 IP:bdiso Level: Cf"},
+(130, 7): {"name": "TSR_J6B_37", "desc": "ModuleID&EventID:0x00210x0001 IP:gic Level: Cf"},
+(131, 0): {"name": "TSR_J6B_38", "desc": "ModuleID&EventID:0x00210x0002 IP:gic Level: Ncf"},
+(131, 1): {"name": "TSR_J6B_39", "desc": "ModuleID&EventID:0x00230x0001 IP:mdma Level: Cf"},
+(131, 2): {"name": "TSR_J6B_40", "desc": "ModuleID&EventID:0x00230x0002 IP:mdma Level: Ncf"},
+(131, 3): {"name": "TSR_J6B_41", "desc": "ModuleID&EventID:0x00240x0001 IP:Clock CMM Level: Cf"},
+(131, 4): {"name": "TSR_J6B_42", "desc": "ModuleID&EventID:0x00250x0001 IP:PMU Level: Cf"},
+(131, 5): {"name": "TSR_J6B_43", "desc": "ModuleID&EventID:0x00260x0001 IP:Firewall Level: Cf"},
+(131, 6): {"name": "TSR_J6B_44", "desc": "ModuleID&EventID:0x00270x0002 IP:bpu0 Level: Ncf"},
+(131, 7): {"name": "TSR_J6B_45", "desc": "ModuleID&EventID:0x00280x0001 IP:fchm Level: Cf"},
+(132, 0): {"name": "TSR_J6B_46", "desc": "ModuleID&EventID:0x00290x0001 IP:PVT Level: Cf"},
+(132, 1): {"name": "TSR_J6B_47", "desc": "ModuleID&EventID:0x002a0x0001 IP:ddr ddr_ctrl Level: Cf"},
+(132, 2): {"name": "TSR_J6B_48", "desc": "ModuleID&EventID:0x002a0x0002 IP:ddr ddr_ctrl Level: Ncf"},
+(132, 3): {"name": "TSR_J6B_49", "desc": "ModuleID&EventID:0x002b0x0001 IP:Noc Level: Cf"},
+(132, 4): {"name": "TSR_J6B_50", "desc": "ModuleID&EventID:0x002c0x0001 IP:ADC Level: Cf"},
+(132, 5): {"name": "TSR_J6B_51", "desc": "ModuleID&EventID:0x002c0x0002 IP:ADC Level: Ncf"},
+(132, 6): {"name": "TSR_J6B_52", "desc": "ModuleID&EventID:0x002d0x0001 IP:Firewall Level: Cf"},
+(132, 7): {"name": "TSR_J6B_53", "desc": "ModuleID&EventID:0x002e0x0001 IP:bdiso Level: Cf"},
+(133, 0): {"name": "TSR_J6B_54", "desc": "ModuleID&EventID:0x002f0x0001 IP:Clock CMM Level: Cf"},
+(133, 1): {"name": "TSR_J6B_55", "desc": "ModuleID&EventID:0x00300x0001 IP:I2c4 Level: Cf"},
+(133, 2): {"name": "TSR_J6B_56", "desc": "ModuleID&EventID:0x00310x0001 IP:I2c5 Level: Cf"},
+(133, 3): {"name": "TSR_J6B_57", "desc": "ModuleID&EventID:0x00320x0001 IP:spi2 Level: Cf"},
+(133, 4): {"name": "TSR_J6B_58", "desc": "ModuleID&EventID:0x00330x0001 IP:spi3 Level: Cf"},
+(133, 5): {"name": "TSR_J6B_59", "desc": "ModuleID&EventID:0x00340x0001 IP:Uart1 Level: Cf"},
+(133, 6): {"name": "TSR_J6B_60", "desc": "ModuleID&EventID:0x00350x0001 IP:Uart2 Level: Cf"},
+(133, 7): {"name": "TSR_J6B_61", "desc": "ModuleID&EventID:0x00360x0001 IP:gpio Level: Cf"},
+(134, 0): {"name": "TSR_J6B_62", "desc": "ModuleID&EventID:0x00370x0001 IP:pwm Level: Cf"},
+(134, 1): {"name": "TSR_J6B_63", "desc": "ModuleID&EventID:0x00380x0001 IP:canfd Level: Cf"},
+(134, 2): {"name": "TSR_J6B_64", "desc": "ModuleID&EventID:0x00390x0001 IP:fchm Level: Cf"},
+(134, 3): {"name": "TSR_J6B_65", "desc": "ModuleID&EventID:0x003a0x0001 IP:r52 Level: Cf"},
+(134, 4): {"name": "TSR_J6B_66", "desc": "ModuleID&EventID:0x003a0x0002 IP:r52 Level: Ncf"},
+(134, 5): {"name": "TSR_J6B_67", "desc": "ModuleID&EventID:0x003b0x0001 IP:ipc Level: Cf"},
+(134, 6): {"name": "TSR_J6B_68", "desc": "ModuleID&EventID:0x003c0x0001 IP:interrupt router Level: Cf"},
+(134, 7): {"name": "TSR_J6B_69", "desc": "ModuleID&EventID:0x003d0x0001 IP:mdma Level: Cf"},
+(135, 0): {"name": "TSR_J6B_70", "desc": "ModuleID&EventID:0x003e0x0001 IP:pdma Level: Cf"},
+(135, 1): {"name": "TSR_J6B_71", "desc": "ModuleID&EventID:0x003e0x0002 IP:pdma Level: Ncf"},
+(135, 2): {"name": "TSR_J6B_72", "desc": "ModuleID&EventID:0x003f0x0001 IP:sram Level: Cf"},
+(135, 3): {"name": "TSR_J6B_73", "desc": "ModuleID&EventID:0x003f0x0002 IP:sram Level: Ncf"},
+(135, 4): {"name": "TSR_J6B_74", "desc": "ModuleID&EventID:0x00400x0001 IP:Sysreg Pinctrl Level: Cf"},
+(135, 5): {"name": "TSR_J6B_75", "desc": "ModuleID&EventID:0x00410x0001 IP:timer Level: Cf"},
+(135, 6): {"name": "TSR_J6B_76", "desc": "ModuleID&EventID:0x00420x0001 IP:PMU Level: Cf"},
+(135, 7): {"name": "TSR_J6B_77", "desc": "ModuleID&EventID:0x00430x0001 IP:wwdt0 Level: Cf"},
+(136, 0): {"name": "TSR_J6B_78", "desc": "ModuleID&EventID:0x00440x0001 IP:wwdt1 Level: Cf"},
+(136, 1): {"name": "TSR_J6B_79", "desc": "ModuleID&EventID:0x00450x0002 IP:Crc Level: Ncf"},
+(136, 2): {"name": "TSR_J6B_80", "desc": "ModuleID&EventID:0x00460x0001 IP:xspi Level: Cf"},
+(136, 3): {"name": "TSR_J6B_81", "desc": "ModuleID&EventID:0x00470x0001 IP:rtc Level: Cf"},
+(136, 4): {"name": "TSR_J6B_82", "desc": "ModuleID&EventID:0x00480x0002 IP:eth Level: Ncf"},
+(136, 5): {"name": "TSR_J6B_83", "desc": "ModuleID&EventID:0x00490x0001 IP:PVT Level: Cf"},
+(136, 6): {"name": "TSR_J6B_84", "desc": "ModuleID&EventID:0x004a0x0001 IP:Hsm_Cf Level: Cf"},
+(136, 7): {"name": "TSR_J6B_85", "desc": "ModuleID&EventID:0x004b0x0002 IP:Main BootUp Selfcheck Level: Ncf"},
+(137, 0): {"name": "TSR_J6B_86", "desc": "ModuleID&EventID:0x004c0x0002 IP:mcu BootUp Selfcheck Level: Ncf"},
+(137, 1): {"name": "TSR_J6B_87", "desc": "ModuleID&EventID:0x004d0x0002 IP:Main Periodcheck Level: Ncf"},
+(137, 2): {"name": "TSR_J6B_88", "desc": "ModuleID&EventID:0x004e0x0002 IP:mcu Periodcheck Level: Ncf"},
+(137, 3): {"name": "TSR_J6B_89", "desc": "ModuleID&EventID:0x004f0x0001 IP:acore Heartbeat Level: Cf"},
+(137, 4): {"name": "TSR_J6B_90", "desc": "ModuleID&EventID:0x00500x0002 IP:Bpu0 Heartbeat Level: Ncf"},
+(137, 5): {"name": "TSR_J6B_91", "desc": "ModuleID&EventID:0x00510x0002 IP:vdsp Heartbeat Level: Ncf"},
+(137, 6): {"name": "TSR_J6B_92", "desc": "ModuleID&EventID:0x00520x0002 IP:PVT Level: Ncf"},
+(137, 7): {"name": "TSR_J6B_93", "desc": "ModuleID&EventID:0x00530x0001 IP:PVT Level: Cf"},
+(138, 0): {"name": "TSR_J6B_94", "desc": "ModuleID&EventID:0x00540x0002 IP:PVT Level: Ncf"},
+(138, 1): {"name": "TSR_J6B_95", "desc": "ModuleID&EventID:0x00550x0001 IP:PVT Level: Cf"},
+(138, 2): {"name": "TSR_J6B_96", "desc": "ModuleID&EventID:0x00560x0002 IP:PVT Level: Ncf"},
+(138, 3): {"name": "TSR_J6B_97", "desc": "ModuleID&EventID:0x00570x0001 IP:PVT Level: Cf"},
+(138, 4): {"name": "TSR_J6B_98", "desc": "ModuleID&EventID:0x00580x0002 IP:Adc_Voltage Level: Ncf"},
+(138, 5): {"name": "TSR_J6B_99", "desc": "ModuleID&EventID:0x00590x0001 IP:Adc_Voltage Level: Cf"},
+(138, 6): {"name": "TSR_J6B_100", "desc": "ModuleID&EventID:0x005a0x0001 IP:QNX process wwdt Level: Cf"},
+(138, 7): {"name": "TSR_J6B_101", "desc": "ModuleID&EventID:0x005d0x0001 IP:Watchdog0 Level: Cf"},
+(139, 0): {"name": "TSR_J6B_102", "desc": "ModuleID&EventID:0x005e0x0001 IP:Watchdog1 Level: Cf"},
+(139, 1): {"name": "TSR_J6B_103", "desc": "ModuleID&EventID:0x005f0x0002 IP:Vdsp0 wwdt Level: Ncf"},
+(139, 2): {"name": "TSR_J6B_104", "desc": "ModuleID&EventID:0x00600x0002 IP:BPU0 Watchdog Level: Ncf"},
+(139, 3): {"name": "TSR_J6B_105", "desc": "ModuleID&EventID:[0xFFF, 0xFFFF]0x0002 IP:Customer Pass- Through DTC Level: Ncf"},
+(139, 4): {"name": "TSR_J6B_106", "desc": "ModuleID&EventID:0x00620x0001 IP:pmic_err0 Level: Cf"},
+(139, 5): {"name": "TSR_J6B_107", "desc": "ModuleID&EventID:0x00620x0002 IP:pmic_err0 Level: Ncf"},
+(139, 6): {"name": "TSR_J6B_108", "desc": "ModuleID&EventID:0x00630x0001 IP:pmic_err1 Level: Cf"},
+(139, 7): {"name": "TSR_J6B_109", "desc": "ModuleID&EventID:0x00630x0002 IP:pmic_err1 Level: Ncf"},
+(140, 0): {"name": "TSR_J6B_110", "desc": "ModuleID&EventID:0x00640x0001 IP:pmic_err2 Level: Cf"},
+(140, 1): {"name": "TSR_J6B_111", "desc": "ModuleID&EventID:0x00640x0002 IP:pmic_err2 Level: Ncf"},
+(140, 2): {"name": "TSR_J6B_112", "desc": "ModuleID&EventID:0x00650x0001 IP:pmic_err3 Level: Cf"},
+(140, 3): {"name": "TSR_J6B_113", "desc": "ModuleID&EventID:0x00650x0002 IP:pmic_err3 Level: Ncf"},
+(140, 4): {"name": "TSR_J6B_114", "desc": "ModuleID&EventID:0x00670x0001 IP:A-core start 置1 Level: Cf"},
+(140, 5): {"name": "TSR_J6B_115", "desc": "ModuleID&EventID:0x00680x0001 IP:A-core panic Level: Cf"},
+(140, 6): {"name": "TSR_J6B_116", "desc": "ModuleID&EventID:0x00690x0002 IP:MaskFault Level: Ncf"},
+(140, 7): {"name": "TSR_GPIO_01（70.1）", "desc": "GPIO:INT_MON_FCV：SENSOR3_ERR"},
+(141, 0): {"name": "TSR_GPIO_02（70）", "desc": "GPIO:INT_MON_AVM：SENSOR2_ERR"},
+(141, 1): {"name": "TSR_GPIO_03(6e.2)", "desc": "GPIO:INT_MON_MCU: EMAC2_RX_D0"},
+(141, 2): {"name": "TSR_GPIO_04（6d.4）", "desc": "GPIO:INT_MON_USS：USS_MCU_INT"},
+(141, 3): {"name": "TSR_GPIO_05(6f.7)", "desc": "GPIO:DMS_SENSE_ERR：SENSOR1_ERR"},
+(141, 4): {"name": "TSR_GPIO_06（6d.6）", "desc": "GPIO:nINT：BIFSPI_CSN"},
+(141, 5): {"name": "TSR_ADC_01(63.5)", "desc": "ADC:VDD_SER(1.8V)"},
+(141, 6): {"name": "TSR_ADC_02(63.6)", "desc": "ADC:VDD_SER(1.2V)"},
+(141, 7): {"name": "TSR_ADC_03（64）", "desc": "ADC:SYS_CAM"},
+(142, 0): {"name": "TSR_ESMPowerD_01", "desc": "SM_43:The system shall toggle nINT at power up to ensure that its function is working properly in case of safety relevant fault happens."},
+(142, 1): {"name": "TSR_ESMPowerD_02", "desc": "SM_44:System shall read back the written value from MPQ70170FS’s register and check this value against the commanded value every time system writes to MPQ70170FS via I2C"},
+(142, 2): {"name": "TSR_ESMPowerD_03", "desc": "SM_45:System shall communicate to MPQ70170FS to ensure that correct I2C address has been assigned."},
+(142, 3): {"name": "TSR_ESMHSDFVC_01", "desc": "SM_7:The system shall communicate to each slave to ensure that each I2C address is correctly assigned. This check shall be performed before system goes into normal operation"},
+(142, 4): {"name": "TSR_ESMHSDFVC_02", "desc": "SM_8:The system shall test the FT pin functionality via register force_ft_pin_low 0x16 bit 0 every power cycle. For more details"},
+(142, 5): {"name": "TSR_ESMHSDFVC_03", "desc": "SM_9:The SoC or microcontroller (MCU) shall read back the written value from the register of MPQ77240FS and check this value against the commanded value."},
+(142, 6): {"name": "TSR_ESMHSDAVM_01", "desc": "SM_7:The system shall communicate to each slave to ensure that each I2C address is correctly assigned. This check shall be performed before system goes into normal operation"},
+(142, 7): {"name": "TSR_ESMHSDAVM_02", "desc": "SM_8:The system shall test the FT pin functionality via register force_ft_pin_low 0x16 bit 0 every power cycle. For more details"},
+(143, 0): {"name": "TSR_ESMHSDAVM_03", "desc": "SM_9:The SoC or microcontroller (MCU) shall read back the written value from the register of MPQ77240FS and check this value against the commanded value."},
+(143, 1): {"name": "TSR_ESMHSDUSS_01", "desc": "SM_7:The system shall communicate to each slave to ensure that each I2C address is correctly assigned. This check shall be performed before system goes into normal operation"},
+(143, 2): {"name": "TSR_ESMHSDUSS_02", "desc": "SM_8:The system shall test the FT pin functionality via register force_ft_pin_low 0x16 bit 0 every power cycle. For more details"},
+(143, 3): {"name": "TSR_ESMHSDUSS_03", "desc": "SM_9:The SoC or microcontroller (MCU) shall read back the written value from the register of MPQ77240FS and check this value against the commanded value."},
+(143, 4): {"name": "TSR_ESMDESFVC_01", "desc": "SM12: Acknowledge of I2C"},
+(143, 5): {"name": "TSR_ESMDESAVM_01", "desc": "SM12: Acknowledge of I2C"},
+(143, 6): {"name": "TSR_ESMJ6B_01", "desc": "AoU-03-PWR: It is assumed that the PMIC shall implement Window watchdog timers to monitor MCU domain."},
+(143, 7): {"name": "TSR_ESMJ6B_02", "desc": "AoU-05-PWR: MCU PMIC shall be used to shutdown downstream actuators when J6B error pins are triggered with no further capability to make correct"},
+(144, 0): {"name": "TSR_ESMFVC_01", "desc": "The system shall check the SuM value when using the camera internal parameters, if the check result is wrong, the system shall not use the internal parameter data.\nADCU在使用摄像头内参时，需要进行Sum计算，并与EEPROM存储的Sum值进行对比，不一致时，停止使用内参数据"},
+(144, 1): {"name": "TSR_ESMFVC_03", "desc": "The system shall make CRC checks on the IIC communication of the camera.\n系统应对和摄像头的IIC通讯进行CRC检查"},
+(144, 2): {"name": "TSR_ESMFVC_04", "desc": "The system shall readback all the configurations for the frount view camera. If there are any errors in the configuration, it should be reconfigured.\n系统应回读所有对前视摄像头的配置，当配置错误时应重新配置"},
+(144, 3): {"name": "TSR_ESMDESFVC_04", "desc": "The system shall make CRC checks on the IIC communication of the MAX96716A.\n系统应对和解串器MAX96716A的IIC通讯进行CRC检查"},
+(144, 4): {"name": "TSR_ESM_HSDFVC_06", "desc": "The system shall make CRC checks on the IIC communication of the FVC HSD (MPQ77240FS).\n系统应对和FVC HSD (MPQ77240FS)的IIC通讯进行CRC检查"},
+(144, 5): {"name": "TSR_ESM_HSDFVC_06", "desc": "The system shall make CRC checks on the IIC communication of the USS HSD (MPQ77240FS).\n系统应对和USS HSD (MPQ77240FS)的IIC通讯进行CRC检查"},
+(144, 6): {"name": "TSR_ESM_HSDUSS_05", "desc": "The Safety Mechanisms listed in the sub-table \"MPQ77240FS SMs\" shall be correctly configured and activated.\n子表格“MAX96716A SMs”所列安全机制应被正确配置并激活"},
+(144, 7): {"name": "TSR_ESM_HSDFVC_05", "desc": "The Safety Mechanisms listed in the sub-table \"MPQ77240FS SMs\" shall be correctly configured and activated.\n子表格“MAX96716A SMs”所列安全机制应被正确配置并激活"},
+(145, 0): {"name": "TSR_MAIN_01", "desc": "CRC protection actived in IPC data transmation\nrefer to TSC 8.3.2.4"},
+(145, 1): {"name": "TSR_OS_01", "desc": "J6BMCU_MPU check_Fault"},
+(145, 2): {"name": "", "desc": ""},
+(145, 3): {"name": "TSR_OS_03", "desc": "J6BMCU_StackOverUnder_Fault"},
+(145, 4): {"name": "TSR_OS_04", "desc": "J6_IrqMon_Fault"},
+(145, 5): {"name": "TSR_OS_05", "desc": "LRR_timesync_error_Fault  ACM"},
+(145, 6): {"name": "TSR_OS_06", "desc": "Acore_timesync_error_Fault  ACM"},
+(145, 7): {"name": "TSR_OS_07", "desc": "APA State Machine Alive Monitor(cycle: 20ms)"},
+(146, 0): {"name": "TSR_OS_08", "desc": "APA Control Alive Monitor(cycle: 20ms)"},
+(146, 1): {"name": "TSR_OS_09", "desc": "TimeSync  Alive Monitor(cycle: 20ms)"},
+(146, 2): {"name": "TSR_OS_10", "desc": "Com Alive Monitor(cycle: 5ms)"},
+(146, 3): {"name": "TSR_OS_11", "desc": "Com Alive Monitor(cycle: 20ms)"},
+(146, 4): {"name": "TSR_OS_12", "desc": "Com Alive Monitor(cycle: 50ms)"},
+(146, 5): {"name": "TSR_OS_13", "desc": "Com Alive Monitor(cycle: 100ms)"},
+(146, 6): {"name": "TSR_OS_14", "desc": "GpAdc Alive Monitor(cycle: 20ms)"},
+(146, 7): {"name": "TSR_OS_15", "desc": "CtApFaultMgr Alive Monitor(cycle: 10ms)"},
+(147, 0): {"name": "TSR_OS_16", "desc": "AdasIf_10msTaskCallback（cycle: 10ms）"},
+(147, 1): {"name": "TSR_OS_17", "desc": "AdasIf_20msTaskCallback(cycle: 20ms)"},
+(147, 2): {"name": "TSR_USS_01", "desc": "APA State Machine Monitor：\n功能描述：\nAdvanced Park Assist Status Authenticated，该信号跳转到5或者跳出5时只允许如下跳转：\n1）只允许1/2/3/4->5;\n2）只允许5->6/7；\nAdvanced Park Assist Status Authenticated为5时，Advanced Park Assist Mode不允许为0，且不允许如下跳转：\n1）2/3->1；\n\n监控状态机模块输出到CAN上的相关信号:\n0x190 Advanced_Park_Assist_Status_190_M / APA Status Signal Group : Advanced Park Assist Status Authenticated（直接读取状态机输出到RTE接口的值）\n0x190 Advanced_Park_Assist_Status_190_M / APA Status Signal Group : Advanced Park Assist Mode（直接读取状态机输出到RTE接口的值）："},
+(147, 3): {"name": "TSR_USS_02", "desc": "USS fault flag monitor"},
+(147, 4): {"name": "TSR_USS_03", "desc": "APA控制模块监控：对APA控制模块的数据接收、数据处理、数据发送代码中的check point进行监控，其运行时序为按照接收 - 处理 - 发送的顺序执行。"},
+(147, 5): {"name": "TSR_OS_18", "desc": "pmic  Alive Monitor（100ms）"},
+(147, 6): {"name": "TSR_OS_19", "desc": "IpcfServer  Alive Monitor（xx）"},
+(147, 7): {"name": "TSR_OS_20", "desc": "SafetyTask_LowestPriorityButShortPeriod （1ms）"},
+(148, 0): {"name": "TSR_OS_21", "desc": "SafetyTask_RelativelyLowPriority（50ms）"},
+(148, 1): {"name": "TSR_OS_22", "desc": "SafetyTask_NeedHighPriority（10ms）"},
+(148, 2): {"name": "", "desc": ""},
+(148, 3): {"name": "", "desc": ""},
+(148, 4): {"name": "", "desc": ""},
+(148, 5): {"name": "", "desc": ""},
+(148, 6): {"name": "", "desc": ""},
+(148, 7): {"name": "", "desc": ""},
+(149, 0): {"name": "", "desc": ""},
+(149, 1): {"name": "", "desc": ""},
+(149, 2): {"name": "", "desc": ""},
+(149, 3): {"name": "", "desc": ""},
+(149, 4): {"name": "", "desc": ""},
+(149, 5): {"name": "", "desc": ""},
+(149, 6): {"name": "", "desc": ""},
+(150, 0): {"name": "", "desc": ""},
+(150, 1): {"name": "", "desc": ""},
+(150, 2): {"name": "", "desc": ""},
+(150, 3): {"name": "", "desc": ""},
+(150, 4): {"name": "", "desc": ""},
+(150, 5): {"name": "", "desc": ""},
+(150, 6): {"name": "", "desc": ""},
+(150, 7): {"name": "", "desc": ""},
+(151, 0): {"name": "", "desc": ""},
+(151, 1): {"name": "", "desc": ""},
+(151, 2): {"name": "", "desc": ""},
+(151, 3): {"name": "", "desc": ""},
+(151, 4): {"name": "", "desc": ""},
+(151, 5): {"name": "", "desc": ""},
+(151, 6): {"name": "", "desc": ""},
+(151, 7): {"name": "", "desc": ""},
+(152, 0): {"name": "", "desc": ""},
+(152, 1): {"name": "", "desc": ""},
+(152, 2): {"name": "", "desc": ""},
+(152, 3): {"name": "", "desc": ""},
+(152, 4): {"name": "", "desc": ""},
+(152, 5): {"name": "", "desc": ""},
+(152, 6): {"name": "", "desc": ""},
+(152, 7): {"name": "", "desc": ""},
+(153, 0): {"name": "", "desc": ""},
+(153, 1): {"name": "", "desc": ""},
+(153, 2): {"name": "", "desc": ""},
+(153, 3): {"name": "", "desc": ""},
+(153, 4): {"name": "", "desc": ""},
+(153, 5): {"name": "", "desc": ""},
+(153, 6): {"name": "", "desc": ""},
+(153, 7): {"name": "", "desc": ""},
+(154, 0): {"name": "", "desc": ""},
+(154, 1): {"name": "", "desc": ""},
+(154, 2): {"name": "", "desc": ""},
+(154, 3): {"name": "", "desc": ""},
+(154, 4): {"name": "", "desc": ""},
+(154, 5): {"name": "", "desc": ""},
+(154, 6): {"name": "", "desc": ""},
+(154, 7): {"name": "", "desc": ""},
+(155, 0): {"name": "", "desc": ""},
+(155, 1): {"name": "", "desc": ""},
+(155, 2): {"name": "", "desc": ""},
+(155, 3): {"name": "", "desc": ""},
+(155, 4): {"name": "", "desc": ""},
+(155, 5): {"name": "", "desc": ""},
+(155, 6): {"name": "", "desc": ""},
+(155, 7): {"name": "", "desc": ""},
+(156, 0): {"name": "", "desc": ""},
+(156, 1): {"name": "", "desc": ""},
+(156, 2): {"name": "", "desc": ""},
+(156, 3): {"name": "", "desc": ""},
+(156, 4): {"name": "", "desc": ""},
+(156, 5): {"name": "", "desc": ""},
+(156, 6): {"name": "", "desc": ""},
+(156, 7): {"name": "", "desc": ""},
+(157, 0): {"name": "", "desc": ""},
+(157, 1): {"name": "", "desc": ""},
+(157, 2): {"name": "", "desc": ""},
+(157, 3): {"name": "", "desc": ""},
+(157, 4): {"name": "", "desc": ""},
+(157, 5): {"name": "", "desc": ""},
+(157, 6): {"name": "", "desc": ""},
+(157, 7): {"name": "", "desc": ""},
+(158, 0): {"name": "", "desc": ""},
+(158, 1): {"name": "", "desc": ""},
+(158, 2): {"name": "", "desc": ""},
+(158, 3): {"name": "", "desc": ""},
+(158, 4): {"name": "", "desc": ""},
+(158, 5): {"name": "", "desc": ""},
+(158, 7): {"name": "", "desc": ""},
+(159, 0): {"name": "", "desc": ""},
+(159, 1): {"name": "", "desc": ""},
+(159, 2): {"name": "", "desc": ""},
+(159, 3): {"name": "", "desc": ""},
+(159, 4): {"name": "", "desc": ""},
+(159, 5): {"name": "", "desc": ""},
+(159, 6): {"name": "", "desc": ""},
+(159, 7): {"name": "", "desc": ""},
+(160, 0): {"name": "", "desc": ""},
+(160, 1): {"name": "", "desc": ""},
+(160, 2): {"name": "", "desc": ""},
+(160, 3): {"name": "", "desc": ""},
+(160, 4): {"name": "", "desc": ""},
+(160, 5): {"name": "", "desc": ""},
+(160, 6): {"name": "", "desc": ""},
+(160, 7): {"name": "", "desc": ""},
+(161, 0): {"name": "", "desc": ""},
+(161, 1): {"name": "S2_C0_LRR_Radar Full Blockage 置1ure", "desc": "雷达完全遮挡故障"},
+(161, 2): {"name": "S2_C0_LRR_Radar partial Blockage 置1ure", "desc": "雷达部分遮挡故障"},
+(161, 3): {"name": "S2_C0_LRR_Radar Low Temperature 置1ure", "desc": "雷达温度过低"},
+(161, 4): {"name": "S2_C0_LRR_Radar overtemperature 置1ure", "desc": "雷达温度过高"},
+(161, 5): {"name": "S2_C0_LRR_Radar Under Voltage 置1ure", "desc": "雷达电压过低"},
+(161, 6): {"name": "S2_C0_LRR_Radar Over Voltage 置1ure", "desc": "雷达电压过高"},
+(161, 7): {"name": "S2_C0_LRR_EoL Alignment 置1ure", "desc": "EoL标定失败"},
+(162, 0): {"name": "S2_C0_LRR_Service Alignment 置1ure", "desc": "服务标定失败"},
+(162, 1): {"name": "S2_C0_LRR_Online Alignment 置1ure", "desc": "在线标定失败"},
+(162, 2): {"name": "S2_C0_LRR_Never Aligned", "desc": "雷达未学习/标定"},
+(162, 3): {"name": "S2_C0_LRR_Radar Memory 置1ure", "desc": "雷达存储故障"},
+(162, 4): {"name": "S2_C0_LRR_Radar Internal Hardware 置1ure", "desc": "雷达内部硬件故障"},
+(162, 5): {"name": "S2_C0_LRR_Radar Internal Software 置1ure", "desc": "雷达内部软件故障"},
+(162, 6): {"name": "S2_C0_LRR_Time Synchronization 置1ure", "desc": "与域控制器时间同步故障"},
+(162, 7): {"name": "S2_C0_LRR_Vehicle Dynamic Parameter 置1ure", "desc": "车身动态信号错误"},
+(163, 0): {"name": "S2_C0_LRR_VIN is not programmed", "desc": "VIN码未被写入"},
+(163, 1): {"name": "S2_C0_LRR_VIN mismatched", "desc": "VIN码不匹配"},
+(163, 2): {"name": "S2_C0_LRR_Lost Communication with Firewall", "desc": "与Firewall丢失通讯"},
+(163, 3): {"name": "S2_C0_LRR_Lost Communication with ADM", "desc": "与ADM丢失通讯"},
+(163, 4): {"name": "S2_C0_LRR_Invalid Data Received From ADM– No Sub Type Information", "desc": "从ADM收到无效数据-Invalidity"},
+(163, 5): {"name": "S2_C0_LRR_Invalid Data Received From ADM– Alive / Sequence Counter Incorrect / Not Updated", "desc": "从ADM收到无效数据-RC/ARC错误"},
+(163, 6): {"name": "S2_C0_LRR_Invalid Data Received From ADM – Value of Signal Protection Calculation/ChehecksumIncorrect", "desc": "从ADM收到无效数据-CRC错误"},
+(163, 7): {"name": "S2_C0_LRR_MEC not equal to zero", "desc": "MEC != 0"},
+(164, 0): {"name": "S1_C6_SRR_RL_Radar Full Blockage 置1ure", "desc": "雷达完全遮挡故障"},
+(164, 1): {"name": "S1_C6_SRR_RL_Radar partial Blockage 置1ure", "desc": "雷达部分遮挡故障"},
+(164, 2): {"name": "S1_C6_SRR_RL_Radar Low Temperature 置1ure", "desc": "雷达温度过低"},
+(164, 3): {"name": "S1_C6_SRR_RL_Radar overtemperature 置1ure", "desc": "雷达温度过高"},
+(164, 4): {"name": "S1_C6_SRR_RL_Radar Under Voltage 置1ure", "desc": "雷达电压过低"},
+(164, 5): {"name": "S1_C6_SRR_RL_Radar Over Voltage 置1ure", "desc": "雷达电压过高"},
+(164, 6): {"name": "S1_C6_SRR_RL_Service Alignment 置1ure", "desc": "服务标定失败"},
+(164, 7): {"name": "S1_C6_SRR_RL_Online Alignment 置1ure", "desc": "在线标定失败"},
+(165, 0): {"name": "S1_C6_SRR_RL_Never Aligned", "desc": "雷达未学习/标定"},
+(165, 1): {"name": "S1_C6_SRR_RL_Radar Memory 置1ure", "desc": "雷达存储故障"},
+(165, 2): {"name": "S1_C6_SRR_RL_Radar Internal Hardware 置1ure", "desc": "雷达内部硬件故障"},
+(165, 3): {"name": "S1_C6_SRR_RL_Radar Internal Software 置1ure", "desc": "雷达内部软件故障"},
+(165, 4): {"name": "S1_C6_SRR_RL_Time Synchronization 置1ure", "desc": "与域控制器时间同步故障"},
+(165, 5): {"name": "S1_C6_SRR_RL_Vehicle Dynamic Parameter 置1ure", "desc": "车身动态信号错误"},
+(165, 6): {"name": "S1_C6_SRR_RL_VIN is not updated", "desc": "VIN码未被写入"},
+(165, 7): {"name": "S1_C6_SRR_RL_VIN mismatched", "desc": "VIN码不匹配"},
+(166, 0): {"name": "S1_C6_SRR_RL_Lost Communication with Firewall", "desc": "与Firewall丢失通讯"},
+(166, 1): {"name": "S1_C6_SRR_RL_Lost Communication with ADM", "desc": "与ADM丢失通讯"},
+(166, 2): {"name": "S1_C6_SRR_RL_Invalid Data Received From ADM– No Sub Type Information", "desc": "从ADM收到无效数据-Invalidity"},
+(166, 3): {"name": "S1_C6_SRR_RL_Invalid Data Received From ADM– Alive / Sequence Counter Incorrect / Not Updated", "desc": "从ADM收到无效数据-RC/ARC错误"},
+(166, 4): {"name": "S1_C6_SRR_RL_Invalid Data Received From ADM – Value of Signal Protection Calculation/ChehecksumIncorrect", "desc": "从ADM收到无效数据-CRC错误"},
+(166, 5): {"name": "S1_C6_SRR_Invalid Data Received From SRR– Alive / Sequence Counter Incorrect / Not Updated", "desc": "从SRR收到无效数据-RC/ARC错误"},
+(166, 6): {"name": "S1_C6_SRR_Invalid Data Received From SRR – Value of Signal Protection Calculation/Chehecksum Incorrect", "desc": "从SRR收到无效数据-CRC错误"},
+(166, 7): {"name": "S1_C6_SRR_RL_MEC not equal to zero", "desc": "MEC != 0"},
+(167, 0): {"name": "S1_C6_CAN1 Bus Off (Private CAN)", "desc": "雷达私CAN Busoff"},
+(167, 1): {"name": "S1_C6_SRR_L Lost Communication with SRR_R", "desc": "Reserved"},
+(167, 2): {"name": "S1_C7_SRR_RR_Radar Full Blockage 置1ure", "desc": "雷达完全遮挡故障"},
+(167, 3): {"name": "S1_C7_SRR_RR_Radar partial Blockage 置1ure", "desc": "雷达部分遮挡故障"},
+(167, 4): {"name": "S1_C7_SRR_RR_Radar Low Temperature 置1ure", "desc": "雷达温度过低"},
+(167, 5): {"name": "S1_C7_SRR_RR_Radar overtemperature 置1ure", "desc": "雷达温度过高"},
+(167, 6): {"name": "S1_C7_SRR_RR_Radar Under Voltage 置1ure", "desc": "雷达电压过低"},
+(167, 7): {"name": "S1_C7_SRR_RR_Radar Over Voltage 置1ure", "desc": "雷达电压过高"},
+(168, 0): {"name": "S1_C7_SRR_RR_Service Alignment 置1ure", "desc": "服务标定失败"},
+(168, 1): {"name": "S1_C7_SRR_RR_Online Alignment 置1ure", "desc": "在线标定失败"},
+(168, 2): {"name": "S1_C7_SRR_RR_Radar Memory 置1ure", "desc": "雷达存储故障"},
+(168, 3): {"name": "S1_C7_SRR_RR_Never Aligned", "desc": "雷达未学习/标定"},
+(168, 4): {"name": "S1_C7_SRR_RR_Radar Internal Hardware 置1ure", "desc": "雷达内部硬件故障"},
+(168, 5): {"name": "S1_C7_SRR_RR_Radar Internal Software 置1ure", "desc": "雷达内部软件故障"},
+(168, 6): {"name": "S1_C7_SRR_RR_Time Synchronization 置1ure", "desc": "与域控制器时间同步故障"},
+(168, 7): {"name": "S1_C7_SRR_RR_Vehicle Dynamic Parameter 置1ure", "desc": "车身动态信号错误"},
+(169, 0): {"name": "S1_C7_SRR_RR_VIN is not updated", "desc": "VIN码未被写入"},
+(169, 1): {"name": "S1_C6_SRR_RR_VIN mismatched", "desc": "VIN码不匹配"},
+(169, 2): {"name": "S1_C7_SRR_RR_Lost Communication with Firewall", "desc": "与Firewall丢失通讯"},
+(169, 3): {"name": "S1_C7_SRR_RR_Lost Communication with ADM", "desc": "与ADM丢失通讯"},
+(169, 4): {"name": "S1_C7_SRR_RR_Invalid Data Received From ADM– No Sub Type Information", "desc": "从ADM收到无效数据-Invalidity"},
+(169, 5): {"name": "S1_C7_SRR_RR_Invalid Data Received From ADM– Alive / Sequence Counter Incorrect / Not Updated", "desc": "从ADM收到无效数据-RC/ARC错误"},
+(169, 6): {"name": "S1_C7_SRR_RR_Invalid Data Received From ADM – Value of Signal Protection Calculation/ChehecksumIncorrect", "desc": "从ADM收到无效数据-CRC错误"},
+(169, 7): {"name": "S1_C7_SRR_Invalid Data Received From SRR– Alive / Sequence Counter Incorrect / Not Updated", "desc": "从SRR收到无效数据-RC/ARC错误"},
+(170, 0): {"name": "S1_C7_SRR_Invalid Data Received From SRR – Value of Signal Protection Calculation/Chehecksum Incorrect", "desc": "从SRR收到无效数据-CRC错误"},
+(170, 1): {"name": "S1_C7_SRR_RR_MEC not equal to zero", "desc": "MEC != 0"},
+(170, 2): {"name": "S1_C7_CAN1 Bus Off (Private CAN)", "desc": "雷达私CAN Busoff"},
+(170, 3): {"name": "S1_C7_SRR_R Lost Communication with SRR_L", "desc": "Reserved"},
+(170, 4): {"name": "", "desc": ""},
+(170, 5): {"name": "", "desc": ""},
+(170, 6): {"name": "", "desc": ""},
+(170, 7): {"name": "", "desc": ""},
+(171, 0): {"name": "", "desc": ""},
+(171, 1): {"name": "", "desc": ""},
+(171, 2): {"name": "", "desc": ""},
+(171, 3): {"name": "", "desc": ""},
+(171, 4): {"name": "", "desc": ""},
+(171, 5): {"name": "", "desc": ""},
+(171, 6): {"name": "", "desc": ""},
+(171, 7): {"name": "", "desc": ""},
+(172, 0): {"name": "S2_0x6BC0001_LRR_SYS_PERFORM_Miss_Msg_Fault", "desc": "前向毫米波雷达0x6BC0001报文丢失"},
+(172, 1): {"name": "S2_0x6BC0000_ LRR_TIME_SYNC_Miss_Msg_Fault", "desc": "前向毫米波雷达0x6BC0000报文丢失"},
+(172, 2): {"name": "S2_0xDBC0000_LRR_OD_Header_Miss_Msg_Fault", "desc": "前向毫米波雷达0xDBC0000报文丢失"},
+(172, 3): {"name": "S2_0xDBC0033_ LRR_ROAD_Miss_Msg_Fault", "desc": "前向毫米波雷达0xDBC0033报文丢失"},
+(172, 4): {"name": "S2_0xDBC0001~0xDBC0019 _LRR_OD_0_1~LRR_OD_48_49_Miss_Msg_Fault", "desc": "前向毫米波雷达0xDBC0001~0xDBC0019报文丢失"},
+(172, 5): {"name": "Reserved UssSWC_Task_10ms_Core0_Miss_Fault", "desc": "USS_10ms_Core0-SDK丢通"},
+(172, 6): {"name": "Reserved UssSWC_Task_5ms_Core0_Miss_Fault", "desc": "USS_5ms_Core0-SDK丢通"},
+(172, 7): {"name": "Reserved UssSWC_Task_1ms_Core0_Miss_Fault", "desc": "USS_1ms_Core0-SDK丢通"},
+(173, 0): {"name": "Reserved UssSWC_Task_10ms_Fast_Core1_Miss_Fault", "desc": "10ms_Fast_Core1-SDK丢通"},
+(173, 1): {"name": "Reserved UssSWC_Task_10ms_Slow_Core1_Miss_Fault", "desc": "10ms_Slow_Core1-SDK丢通"},
+(173, 2): {"name": "S2_0x6BC0001_LRR_SYS_PERFORM_CRC_Fault", "desc": "前向毫米波雷达通信校验异常"},
+(173, 3): {"name": "S2_0x6BC0000 _LRR_TIME_SYNC_CRC_Fault", "desc": "前向毫米波雷达通信校验异常"},
+(173, 4): {"name": "S2_0xDBC0000 _LRR_OD_Header_CRC_Fault", "desc": "前向毫米波雷达通信校验异常"},
+(173, 5): {"name": "S2_0xDBC0033_LRR_S2CAN_CRC_Fault", "desc": "前向毫米波雷达通信校验异常"},
+(173, 6): {"name": "S2_0xDBC0001~0xDBC0019_LRR_OD_0_1_CRC~LRR_OD_48_49_CRC_Fault （ LRR_OD_0_1~LRR_OD_48_49）", "desc": "前向毫米波雷达通信校验异常"},
+(173, 7): {"name": "Reserved", "desc": ""},
+(174, 0): {"name": "PB_036_IMU_Yaw_Latitud_Acc_036_M_Miss_Fault", "desc": "Latitud_Acc 通信丢失"},
+(174, 1): {"name": "PB_038_IMU_Yaw_Long_Acc_038_M_Miss_Fault", "desc": "Long_Acc通信丢失"},
+(174, 2): {"name": "PB_036_IMUYawLattAcMAC_Fault", "desc": "IMUYawLattAcMAC校验故障"},
+(174, 3): {"name": "PB_036_IMULatAccPrimARC_Fault", "desc": "IMULatAccPrimARC校验故障"},
+(174, 4): {"name": "PB_038_IMUYawLgAcMAC_Fault", "desc": "IMUYawLgAcMAC校验故障"},
+(174, 5): {"name": "PB_038_IMULonAccPriARC_Fault", "desc": "IMULonAccPriARC校验故障"},
+(174, 6): {"name": "PB_031_WhlSpdVelLFrtAuthV_Fault", "desc": "WhlAngVelLFrtAuth校验故障"},
+(174, 7): {"name": "PB_031_WhlSpdVelRFrtAuthV_Fault", "desc": "WhlAngVelRFrtAuthV校验故障"},
+(175, 0): {"name": "PB_031_WhlSpdVelLRrAuthV_Fault", "desc": "WhlAngVelLRrAuthV检验故障"},
+(175, 1): {"name": "PB_031_WhlSpdVelRRrAuthV_Fault", "desc": "WhlAngVelRRrAuthV检验故障"},
+(175, 2): {"name": "PB_034_StrWhAngV_Fault", "desc": "StrWhAngV检验故障"},
+(175, 3): {"name": "PB_034_StrWhlAngSenCalStat_Fault", "desc": "StrWhlAngSenCalStat检验故障"},
+(175, 4): {"name": "PB_034_StrWhAngMsk_Fault", "desc": "StrWhAngMsk检验故障"},
+(175, 5): {"name": "LIN_2A_SWTCOpnWhlCalComplt_6A_1_Fault", "desc": "HOD故障"},
+(175, 6): {"name": "LIN_2A_StrWhlTchSnsngFltPr_6A_1_Fault", "desc": "HOD故障"},
+(175, 7): {"name": "LIN_2A_SWTCRsp_Missing_Fault", "desc": "HOD通信丢失"},
+(176, 0): {"name": "LIN_2A_SWTCTuchSnsngARC_6A_1_Fault", "desc": "HOD通信校验故障"},
+(176, 1): {"name": "LIN_2A_SWTCTuchSnsngChksm_6A_1_Fault", "desc": "HOD通信checksum错误"},
+(176, 2): {"name": "PB_054_StrgSystoActSafeInfMAC_Fault", "desc": "StrgSystoActSafeInfMAC校验故障"},
+(176, 3): {"name": "PB_054_StrgSystoActSafeInf_ARC_Fault", "desc": "StrgSystoActSafeInf校验故障"},
+(176, 4): {"name": "PB_034_PPEIStrWhlAngMAC2_Fault", "desc": "PPEIStrWhlAngMAC2校验故障"},
+(176, 5): {"name": "PB_034_StWhlAngARC_Fault", "desc": "StWhlAngARC校验故障"},
+(176, 6): {"name": "PB_034_StrWhlAngSenCalStatARC_Fault", "desc": "StrWhlAngSenCalStatARC验证故障"},
+(176, 7): {"name": "PB_0A5_ElcPwStrMAC_Fault", "desc": "ElcPwStrMAC验证故障"},
+(177, 0): {"name": "PB_0A5_ElecPwrStrAvalStatARC_Fault", "desc": "ElecPwrStrAvalStatARC验证故障"},
+(177, 1): {"name": "PB_0A5_DrvStrIntfrDtcdARC_Fault", "desc": "DrvStrIntfrDtcdARC验证故障"},
+(177, 2): {"name": "PB_054_Strg_Sys_to_Act_Safe_Inf_054_M_Miss_Fault", "desc": "PCAN 0x054报文丢失"},
+(177, 3): {"name": "PB_034_PPEI_Steering_Wheel_Angle_034_M2_Miss_Fault", "desc": "PCAN 0x034报文丢失"},
+(177, 4): {"name": "PB_0A5_Electric_Power_Steering_0A5_M_Miss_Fault", "desc": "PCAN 0x0A5报文丢失"},
+(177, 5): {"name": "PB_054_StrngTrqOvrlAngDStat_Fault", "desc": "EPS控制功能故障（行车）"},
+(177, 6): {"name": "PB_0C2_ CPSATCS_ReqStatus _Fault", "desc": "针对AEB功能的动力系统故障"},
+(177, 7): {"name": "PB_082_AccActPosV_Fault", "desc": "油门踏板深度无效"},
+(178, 0): {"name": "PB_0D7_PTEIBrkAppStatMAC_Fault", "desc": "PTEIBrkAppStatMAC通信校验故障"},
+(178, 1): {"name": "PB_0D7_PPEITransGenSt2ARC_ECP_H1_Fault", "desc": "PPEITransGenSt2ARC通信校验故障"},
+(178, 2): {"name": "PB_08D_PPEIEngTrqSt4MAC_Fault", "desc": "PPEIEngTrqSt4MAC通信校验故障"},
+(178, 3): {"name": "PB_08D_PPEIEngTrqSt4ARC_Fault", "desc": "PPEIEngTrqSt4ARC通信校验故障"},
+(178, 4): {"name": "PB_0C2_PPEIPrplGenDat1ARC_Fault", "desc": "PPEIPrplGenDat1ARC通信校验故障"},
+(178, 5): {"name": "PB_0C2_PPEIPrplGenDat1MAC_Fault", "desc": "PPEIPrplGenDat1MAC通信校验故障"},
+(178, 6): {"name": "PB_082_PPEIEngGenSt1MAC2_Fault", "desc": "PPEIEngGenSt1MAC2通信校验故障"},
+(178, 7): {"name": "PB_082_AccActPosARC_Fault", "desc": "AccActPosARC通信校验故障"},
+(179, 0): {"name": "PB_208_PPEIVehSpdaDisMAC2_Fault", "desc": "PPEIVehSpdaDisMAC2通信校验故障"},
+(179, 1): {"name": "PB_208_VehSpdAvgNDrvnARC_Fault", "desc": "VehSpdAvgNDrvnARC通信校验故障"},
+(179, 2): {"name": "PB_209_PPEIVehSpdaDisMAC1_Fault", "desc": "PPEIVehSpdaDisMAC1通信校验故障"},
+(179, 3): {"name": "PB_209_VehSpdAvgDrvnARC_Fault", "desc": "VehSpdAvgDrvnARC通信校验故障"},
+(179, 4): {"name": "PB_0D7_PPEI_Trans_General_Status_2_ECP_H1_0D7_M_Miss_Fault", "desc": "PCAN 0x0D7报文丢失"},
+(179, 5): {"name": "PB_08D_PPEI_Engine_Torque_Status_4_08D_M_Miss_Fault", "desc": "PCAN 0x08D报文丢失"},
+(179, 6): {"name": "PB_0C2_PPEI_Propulsion_General_Data_1_0C2_M_Miss_Fault", "desc": "PCAN 0x0C2报文丢失"},
+(179, 7): {"name": "PB_082_PPEI_Engine_General_Status_1_082_M2_Miss_Fault", "desc": "PCAN 0x082报文丢失"},
+(180, 0): {"name": "PB_208_PPEI_Vehicle_Speed_and_Distance_208_M2_Miss_Fault", "desc": "PCAN 0x208 报文丢失"},
+(180, 1): {"name": "PB_209_PPEI_Vehicle_Speed_and_Distance_209_M1_Miss_Fault", "desc": "PCAN 0x209 报文丢失"},
+(180, 2): {"name": "", "desc": ""},
+(180, 3): {"name": "", "desc": ""},
+(180, 4): {"name": "PB_085_SD11P_MAC_Fault", "desc": "SD11PMAC通信校验故障"},
+(180, 5): {"name": "PB_085_SD11P_ARC_Fault", "desc": "SD11PARC通信校验故障"},
+(180, 6): {"name": "PB_078_PTEITransTqRqMAC_Fault", "desc": "PTEITransTqRqMAC通信校验故障"},
+(180, 7): {"name": "PB_078_TransActlRngStARC_ECP_H1_Fault", "desc": "TransActlRngStARC通信校验故障"},
+(181, 0): {"name": "Reserved", "desc": ""},
+(181, 1): {"name": "PB_085_SrlDat11_Prtctd_085_M_Miss_Fault", "desc": "PCAN 0x085 报文丢失"},
+(181, 2): {"name": "PB_078_PTEI_Transmission_Torque_Request_078_M_Miss_Fault", "desc": "PCAN 0x078 报文丢失"},
+(181, 3): {"name": "PB_0D7_TransEstGearV_Fault", "desc": "PHEV/BEV车型：行车档位状态无效"},
+(181, 4): {"name": "PB_085_ElecShfAPACtlStsAuth_Fault", "desc": "档位控制故障"},
+(181, 5): {"name": "PB_191_BrkSysAutBrkFld_Fault", "desc": "制动系统异常（行车）"},
+(181, 6): {"name": "PB_0AC_BrkPdlDrvAppPrsDetcdV_Fault", "desc": "制动踏板故障"},
+(181, 7): {"name": "PB_030_Brakepedal_Fault", "desc": "制动踏板故障"},
+(182, 0): {"name": "PB_0AC_ABSFld_Fault", "desc": "ABS故障"},
+(182, 1): {"name": "PB_203_TCSysOpStat_Fault", "desc": "TCS故障"},
+(182, 2): {"name": "PB_203_VehStabEnhmntStat_Fault", "desc": "VCD故障"},
+(182, 3): {"name": "PB_191_PPEIChsGenDat2MAC_Fault", "desc": "PPEIChsGenDat2MAC通信校验故障"},
+(182, 4): {"name": "PB_191_PPEIChsGenDat2ARC_Fault", "desc": "PPEIChsGenDat2ARC通信校验故障"},
+(182, 5): {"name": "PB_044_AutBrkStatMAC_Fault", "desc": "AutBrkStatMAC通信校验故障"},
+(182, 6): {"name": "PB_044_AutBrkStatARC_Fault", "desc": "AutBrkStatARC通信校验故障"},
+(182, 7): {"name": "PB_0AC_PPEIChsGenDat3MAC_Fault", "desc": "PPEIChsGenDat3MAC通信校验故障"},
+(183, 0): {"name": "PB_0AC_PPEIChsGenDat3ARC_Fault", "desc": "PPEIChsGenDat3ARC通信校验故障"},
+(183, 1): {"name": "PB_030_PPEIBrkAppStMAC1_Fault", "desc": "PPEIBrkAppStMAC1通信校验故障"},
+(183, 2): {"name": "PB_030_BrkPdlModTrvlARC_Fault", "desc": "BrkPdlModTrvlARC通信校验故障"},
+(183, 3): {"name": "PB_030_BrkPedPosARC_Fault", "desc": "BrkPedPosARC通信校验故障"},
+(183, 4): {"name": "PB_030_BrkPedTrvlAchvdARC_Fault", "desc": "BrkPedTrvlAchvdARC通信校验故障"},
+(183, 5): {"name": "PB_130_BSAPABPMAC_Fault", "desc": "BSAPABPMAC通信校验故障"},
+(183, 6): {"name": "Reserved", "desc": ""},
+(183, 7): {"name": "PB_031_PPEIChsGenDat1MAC_Fault", "desc": "PPEIChsGenDat1MAC通信校验故障"},
+(184, 0): {"name": "PB_031_PPEIChsGenDat1ARC_Fault", "desc": "PPEIChsGenDat1ARC通信校验故障"},
+(184, 1): {"name": "PB_203_AntilkBrkaTCStMAC_Fault", "desc": "AntilkBrkaTCStMAC通信校验故障"},
+(184, 2): {"name": "PB_203_TCSysOpStatARC_Fault", "desc": "TCSysOpStatARC通信校验故障"},
+(184, 3): {"name": "PB_203_VehStabEnhmntStatARC_Fault", "desc": "VehStabEnhmntStatARC通信校验故障"},
+(184, 4): {"name": "PB_191_PPEI_Chassis_General_Data_2_191_M_Miss_Fault", "desc": "PCAN 0x191 报文丢失"},
+(184, 5): {"name": "PB_044_Automatic_Braking_Status_Miss_Fault", "desc": "PCAN 0x044 报文丢失"},
+(184, 6): {"name": "PB_0AC_PPEI_Chassis_General_Data_3_0AC_M_Miss_Fault", "desc": "PCAN 0x0AC 报文丢失"},
+(184, 7): {"name": "PB_030_PPEI_Brake_Apply_Status_030_M_Miss_Fault", "desc": "PCAN 0x030 报文丢失"},
+(185, 0): {"name": "PB_23C_PPEI_Chassis_General_Data_4_Miss_Fault", "desc": "PCAN 0x23C 报文丢失"},
+(185, 1): {"name": "PB_1B4_PPEI_Chassis_General_Status_2_Miss_Fault", "desc": "PCAN 0x1B4 报文丢失"},
+(185, 2): {"name": "PB_130_EBCMGnrlInfo2_Prtctd_MSG_130_M_Miss_Fault", "desc": "PCAN 0x130 报文丢失"},
+(185, 3): {"name": "PB_031_PPEI_Chassis_General_Data_1_031_M_Miss_Fault", "desc": "PCAN 0x031 报文丢失"},
+(185, 4): {"name": "PB_203_Antilock_Brake_and_TC_Status_203_M_Miss_Fault", "desc": "PCAN 0x203 报文丢失"},
+(185, 5): {"name": "PB_209_VehSpdAvgDrvnV_Fault", "desc": "行车车速无效"},
+(185, 6): {"name": "PB_130_EPBSP_ElecPrkBrkAvlStsAuth_Fault", "desc": "EPB故障"},
+(185, 7): {"name": "Reserved", "desc": ""},
+(186, 0): {"name": "PB_130_EPBSP_ARC_Fault", "desc": "EPBSP_ARC通信校验故障"},
+(186, 1): {"name": "Reserved", "desc": ""},
+(186, 2): {"name": "PB_35F_IDSMdOnOffChgARC_Fault", "desc": "IDSMdOnOffChgARC通信校验故障"},
+(186, 3): {"name": "PB_404_VCSPFIDMAC_Fault", "desc": "VCSPFIDMAC通信校验故障"},
+(186, 4): {"name": "PB_404_FFDispFltIOARC_Fault", "desc": "FFDispFltIOARC通信校验故障"},
+(186, 5): {"name": "PB_35F_Intelligent_Driving_System_Mode_Req_1_Miss_Fault", "desc": "PCAN 0x35F 报文丢失"},
+(186, 6): {"name": "PB_1E9_Info_General_Message_2_Miss_Fault", "desc": "PCAN 0x1E9 报文丢失"},
+(186, 7): {"name": "CE_364_Active_Safety_Customization_Req_1_VCU_Miss_Fault", "desc": "PCAN 0x364 报文丢失"},
+(187, 0): {"name": "PB_16A_Chime_Request_Miss_Fault", "desc": "PCAN 0x16A 报文丢失"},
+(187, 1): {"name": "PB_418_Infotainment_Operation_Miss_Fault", "desc": "PCAN 0x418 报文丢失"},
+(187, 2): {"name": "PB_404_Virtual_Cockpit_System_Disp_F_Ind_On_404_M_Miss_Fault", "desc": "PCAN 0x404 报文丢失"},
+(187, 3): {"name": "PB_404_FIDMIPCDispPnlStat_Fault", "desc": "仪表显示故障"},
+(187, 4): {"name": "PB_404_IDSDispFlt1_Fault", "desc": "仪表显示故障"},
+(187, 5): {"name": "PB_404_IDSDispFlt2_Fault", "desc": "仪表显示故障"},
+(187, 6): {"name": "PB_139_BGI1P_ARC_Fault", "desc": "BGI1PARC通信校验故障"},
+(187, 7): {"name": "PB_139_BGI1PChksm_Fault", "desc": "BGI1PChksm通信校验故障"},
+(188, 0): {"name": "PB_201_HdStARC_Fault", "desc": "HdStARC通信校验故障"},
+(188, 1): {"name": "PB_111_SysPwrMdARC_Fault", "desc": "SysPwrMdARC通信校验故障"},
+(188, 2): {"name": "PB_111_SysPwrMdV_Fault", "desc": "SysPwrMdV有效性故障"},
+(188, 3): {"name": "PB_137_TrnSwPstnADASARC_Fault", "desc": "TrnSwPstnADASARC通信校验故障"},
+(188, 4): {"name": "Reserved", "desc": ""},
+(188, 5): {"name": "PB_200_Body_Information_1_Miss_Fault", "desc": "PCAN 0x200 报文丢失"},
+(188, 6): {"name": "PB_201_Body_Information_201_M2_Miss_Fault", "desc": "PCAN 0x201 报文丢失"},
+(188, 7): {"name": "PB_725_Headlamp_Levelling_Status_Miss_Fault", "desc": "PCAN 0x725 报文丢失"},
+(189, 0): {"name": "PB_111_PPEI_Platform_General_Status_111_M_Miss_Fault", "desc": "PCAN 0x111 报文丢失"},
+(189, 1): {"name": "PB_137_Turn_Switch_Position_ADAS_137_M_Miss_Fault", "desc": "PCAN 0x137 报文丢失"},
+(189, 2): {"name": "PB_139_BdyGenInfo1_Prtctd_MSG_139_M_Miss_Fault", "desc": "PCAN 0x139 报文丢失"},
+(189, 3): {"name": "PB_34A_PPEI_Body_Information_14_Miss_Fault", "desc": "PCAN 0x34A 报文丢失"},
+(189, 4): {"name": "PB_401_Body_Information_15_Miss_Fault", "desc": "PCAN 0x401 报文丢失"},
+(189, 5): {"name": "PB_53C0001_Front_Door_Control_Switch_Information_Miss_Fault", "desc": "PCAN 53C0001 报文丢失"},
+(189, 6): {"name": "PB_200_DDAjrSwAtvM_Fault", "desc": "左前门状态无效"},
+(189, 7): {"name": "PB_201_HdStV_Fault", "desc": "前舱盖状态无效"},
+(190, 0): {"name": "PB_215_DrSbltAtcV_Fault", "desc": "主驾安全带状态无效"},
+(190, 1): {"name": "PB_401_FLTrnIndLtFld_Fault", "desc": "左转向灯故障"},
+(190, 2): {"name": "PB_401_RLTrnIndLtFld_Fault", "desc": "左转向灯故障"},
+(190, 3): {"name": "PB_401_FRTrnIndLtFld_Fault", "desc": "右转向灯故障"},
+(190, 4): {"name": "PB_401_RRTrnIndLtFld_Fault", "desc": "右转向灯故障"},
+(190, 5): {"name": "PB_401_LftBrkLtFld_Fault", "desc": "制动灯无效"},
+(190, 6): {"name": "PB_401_RtBrkLtFld_Fault", "desc": "制动灯无效"},
+(190, 7): {"name": "PB_401_CHMSLFld_Fault", "desc": "制动灯无效"},
+(191, 0): {"name": "PB_401_LftHghBmFld_Fault", "desc": "远光灯故障"},
+(191, 1): {"name": "PB_401_RtHghBmFld_Fault", "desc": "远光灯故障"},
+(191, 2): {"name": "PB_22F_AutoBmSlctAllwdInVd_Fault", "desc": "远光灯故障"},
+(191, 3): {"name": "PB_401_LftLwBmFld_Fault", "desc": "近光灯故障"},
+(191, 4): {"name": "PB_401_RtLwBmFld_Fault", "desc": "近光灯故障"},
+(191, 5): {"name": "PB_11C_CruzCtlSwBank1Sts_Fault", "desc": "方向盘巡航按键故障"},
+(191, 6): {"name": "PB_11C_CruzCtlSwBank2Sts_Fault", "desc": "方向盘巡航按键故障"},
+(191, 7): {"name": "PB_11C_CruzCtlSwBankStsMAC_Fault", "desc": "CruzCtlSwBankStsMAC通信校验故障"},
+(192, 0): {"name": "PB_11C_CruzCtlSwBankStsARC_Fault", "desc": "CruzCtlSwBankStsARC通信校验故障"},
+(192, 1): {"name": "PB_11C_Cruise_Control_Switch_Bank_Status_11C_M_Miss_Fault", "desc": "PCAN 11C 报文丢失"},
+(192, 2): {"name": "PB_20D_System_Power_Mode_Backup_VCU_20D_M_Miss_Fault", "desc": "PCAN 20D 报文丢失"},
+(192, 3): {"name": "PB_20D_SysBkupPwrMdEnARC_VCU_Fault", "desc": "SysBkupPwrMdEnARC_VCU通信校验故障"},
+(192, 4): {"name": "PB_20D_SysBkUpPwrMdV_VCU_Fault", "desc": "SysBkUpPwrMdV有效性故障"},
+(192, 5): {"name": "Reserved", "desc": ""},
+(192, 6): {"name": "PB_1D1_NotEventStat_Fault", "desc": "碰撞事故发生"},
+(192, 7): {"name": "PB_1D1_SIRDplARC_Fault", "desc": "SIRDplARC通信校验故障"},
+(193, 0): {"name": "PB_1D1_Airbag_Impact_Data_1D1_M_Miss_Fault", "desc": "PCAN 1D1 报文丢失"},
+(193, 1): {"name": "PB_13D_MDSRPSMAC_Fault", "desc": "MDSRPSMAC通信校验故障"},
+(193, 2): {"name": "PB_13D_MDSRPSARC_Fault", "desc": "MDSRPSARC通信校验故障"},
+(193, 3): {"name": "CE_1EF_SRPBtnMblDevStsARC_Fault", "desc": "SRPBtnMblDevStsARC通信校验故障"},
+(193, 4): {"name": "PB_13D_Mbl_Dvc_SRP_Status_13D_M_Miss_Fault", "desc": "PCAN 13D 报文丢失"},
+(193, 5): {"name": "CE_1EF_SRP_Button_Mobile_Device_Status_Miss_Fault", "desc": "CCAN 1EF 报文丢失"},
+(193, 6): {"name": "CE_048_Electric_Brake_System_Info_1_048_M_Miss_Fault", "desc": "CCAN 048 报文丢失"},
+(193, 7): {"name": "CE_048_ElBrkSysInf1MAC_Fault", "desc": "ElBrkSysInf1MAC通信校验故障"},
+(194, 0): {"name": "CE_048_EBrkAstToBrkSys1ARC_Fault", "desc": "MDSRPSARC通信校验故障"},
+(194, 1): {"name": "CB_071_ICE_PTEI_Brake_Apply_Status_071_M_Miss_Fault", "desc": "CCAN 071 报文丢失"},
+(194, 2): {"name": "CB_071_PTEIBrkAppStatMAC_ICE_Fault", "desc": "PTEIBrkAppStatMAC_ICE通信校验故障"},
+(194, 3): {"name": "CB_071_ESAPACP_ARC_ICE_Fault", "desc": "ESAPACP_ARC_ICE通信校验故障"},
+(194, 4): {"name": "PB_076_PTEI_Transmission_Torque_Request_076_M_Miss_Fault", "desc": "PCAN 076 报文丢失"},
+(194, 5): {"name": "PB_076_PTEITransTqRqMAC_ICE_Fault", "desc": "PTEITransTqRqMAC通信校验故障"},
+(194, 6): {"name": "Reserved", "desc": ""},
+(194, 7): {"name": "Reserved", "desc": ""},
+(195, 0): {"name": "Reserved", "desc": ""},
+(195, 1): {"name": "PB_076_TransActlRngStARC_ICE_Fault", "desc": "TransActlRngStARC_ICE通信校验故障"},
+(195, 2): {"name": "Reserved", "desc": ""},
+(195, 3): {"name": "Reserved", "desc": ""},
+(195, 4): {"name": "PB_0AE_ICE_PPEI_Chassis_General_Data_3_0AE_M__Miss_Fault", "desc": "PCAN 0AE 报文丢失"},
+(195, 5): {"name": "PB_0AE_PPEIChsGenDat3MAC_ICE2_Fault PB_0AE_PPEIChsGenDat3Chksm_ICE2_Fault", "desc": "PB_0AE_PPEIChsGenDat3Chksm_ICE2通信校验故障"},
+(195, 6): {"name": "PB_0AE_PPEIChsGenDat3ARC_ICE2_Fault", "desc": "PPEIChsGenDat3ARC_ICE2通信校验故障"},
+(195, 7): {"name": "PB_068_ICE_PPEI_Chassis_General_Data_1_068_M__Miss_Fault", "desc": "PCAN 068 报文丢失"},
+(196, 0): {"name": "PB_068_PPEIChsGenDat1MAC_ICE2_Fault", "desc": "PPEIChsGenDat1MAC_ICE2通信校验故障"},
+(196, 1): {"name": "PB_068_PPEIChsGenDat1ARC_ICE2_Fault", "desc": "PPEIChsGenDat1ARC_ICE2通信校验故障"},
+(196, 2): {"name": "CE_0C8_PPEI_Trans_General_Status_2_TCM_0C8_M2__Miss_Fault", "desc": "CCAN 0C8 报文丢失"},
+(196, 3): {"name": "CE_0C8_PPEITransGenSt2MAC2_TCM_Fault", "desc": "PPEITransGenSt2MAC2_TCM通信校验故障"},
+(196, 4): {"name": "CE_0C8_TrnsShftLvrPosARC_TCM_Fault", "desc": "TrnsShftLvrPosARC_TCM通信校验故障"},
+(196, 5): {"name": "CE_0C8_CltchPdlActPosARC_TCM_Fault", "desc": "CltchPdlActPosARC_TCM通信校验故障"},
+(196, 6): {"name": "CE_0C8_TransEstGearARC_TCM_Fault", "desc": "TransEstGearARC_TCM通信校验故障"},
+(196, 7): {"name": "PB_111_PPEIPltGenStMAC_Fault", "desc": "PPEIPltGenStMAC通信校验故障"},
+(197, 0): {"name": "PB_132_ICE_EBCMGnrlInfo2_Prtctd_MSG_132_M__Miss_Fault", "desc": "PCAN 132 报文丢失"},
+(197, 1): {"name": "PB_132_BSAPABPMAC_ICE2_Fault", "desc": "BSAPABPMAC_ICE2通信校验故障"},
+(197, 2): {"name": "Reserved", "desc": ""},
+(197, 3): {"name": "Reserved", "desc": ""},
+(197, 4): {"name": "Reserved", "desc": ""},
+(197, 5): {"name": "PB_1D6_RemProgActAuth_MSG_1D6_M__Miss_Fault", "desc": "PCAN 1D6 报文丢失"},
+(197, 6): {"name": "PB_1D6_RemProgActAuthMAC_Fault", "desc": "RemProgActAuthMAC通信校验故障"},
+(197, 7): {"name": "PB_1D6_RmtProgmActvAuthARC_Fault", "desc": "RmtProgmActvAuthARC通信校验故障"},
+(198, 0): {"name": "PB_4E3_Customer_Authorization_Status_4E3_M__Miss_Fault", "desc": "PCAN 4E3 报文丢失"},
+(198, 1): {"name": "PB_4E3_CustAUZStsMAC_1_Fault", "desc": "CustAUZStsMAC通信校验故障"},
+(198, 2): {"name": "PB_4E6_Air_Suspension_Ride_Height_Status_4E6_M__Miss_Fault", "desc": "PCAN 4E6 报文丢失"},
+(198, 3): {"name": "Reserved", "desc": ""},
+(198, 4): {"name": "PB_4E6_AirSpnsnRdHghtStsARC_Fault", "desc": "RmtProgmActvAuthARC通信校验故障"},
+(198, 5): {"name": "PB_511_PPEI_Powertrain_Configuration_Data_511_M__Miss_Fault", "desc": "PCAN 511 报文丢失"},
+(198, 6): {"name": "PB_511_WhlDstMAC_Fault", "desc": "WhlDstMAC通信校验故障"},
+(198, 7): {"name": "PB_511_WhlDstPrRvlAuthARC_Fault", "desc": "WhlDstPrRvlAuthARC通信校验故障"},
+(199, 0): {"name": "PB_0C6_PPEI_Propulsion_Gen_Stat_1_0C6_M__Miss_Fault", "desc": "PCAN 0C6 报文丢失"},
+(199, 1): {"name": "Reserved", "desc": ""},
+(199, 2): {"name": "PB_0C6_PrplsnSysAtvARC_Fault", "desc": "PrplsnSysAtvARC通信校验故障"},
+(199, 3): {"name": "PB_073_PPEI_Engine_General_Status_1_073_M1__Miss_Fault", "desc": "PCAN 073 报文丢失"},
+(199, 4): {"name": "Reserved", "desc": ""},
+(199, 5): {"name": "PB_073_Eng12vStrtrMtrCmmdOnARC_Fault", "desc": "Eng12vStrtrMtrCmmdOnARC通信校验故障"},
+(199, 6): {"name": "PB_073_EngSpdARC_Fault", "desc": "EngSpdARC通信校验故障"},
+(199, 7): {"name": "PB_073_EngSpdStatARC_Fault", "desc": "EngSpdStatARC通信校验故障"},
+(200, 0): {"name": "PB_0A8_Wheel_Distance_Direction_Info_High_Frequency__Miss_Fault", "desc": "PCAN 0A8 报文丢失"},
+(200, 1): {"name": "PB_0A8_WhlRotDirStatHigFreqARC_Fault", "desc": "WhlRotDirStatHigFreqARC通信校验故障"},
+(200, 2): {"name": "PB_0A8_WhlDistEdgeCntrLRHigFreqVld_Fault", "desc": "WhlDistEdgeCntrLRHigFreqVld有效性故障"},
+(200, 3): {"name": "PB_0A8_WhlDistEdgeCntrRRHigFreqVld_Fault", "desc": "WhlDistEdgeCntrRRHigFreqVld有效性故障"},
+(200, 4): {"name": "PB_0A8_WhlDistEdgeCntrRFHigFreqVld_Fault", "desc": "WhlDistEdgeCntrRFHigFreqVld有效性故障"},
+(200, 5): {"name": "PB_0A8_WhlDistEdgeCntrLFHigFreqVld_Fault", "desc": "WhlDistEdgeCntrLFHigFreqVld有效性故障"},
+(200, 6): {"name": "PB_152_Door_Lock_Status_152_M__Miss_Fault", "desc": "PCAN 152 报文丢失"},
+(200, 7): {"name": "Reserved", "desc": ""},
+(201, 0): {"name": "PB_164_Exterior_Lighting__Miss_Fault", "desc": "PCAN 164 报文丢失"},
+(201, 1): {"name": "PB_215_Seatbelt_Information_215_M__Miss_Fault", "desc": "PCAN 215 报文丢失"},
+(201, 2): {"name": "Reserved", "desc": ""},
+(201, 3): {"name": "PB_215_DrSbltAtcARC_Fault", "desc": "DrSbltAtcARC通信校验故障"},
+(201, 4): {"name": "PB_215_PsSbltAtcV_Fault", "desc": "PsSbltAtcV有效性故障"},
+(201, 5): {"name": "PB_22F_Exterior_Aux_Light_Status__Miss_Fault", "desc": "PCAN 22F 报文丢失"},
+(201, 6): {"name": "Reserved", "desc": ""},
+(201, 7): {"name": "PB_23D_PPEI_Chassis_General_Data_5__Miss_Fault", "desc": "PCAN 23D 报文丢失"},
+(202, 0): {"name": "PB_3E9_PPEI_Engine_Environmental_Status__Miss_Fault", "desc": "PCAN 3E9 报文丢失"},
+(202, 1): {"name": "PB_3E9_OtsAirTmpARC_Fault", "desc": "OtsAirTmpARC通信校验故障"},
+(202, 2): {"name": "PB_3E9_OtsAirTmpV_Fault", "desc": "OtsAirTmpV有效性故障"},
+(202, 3): {"name": "PB_41C_Customization_Change_Setting_Request_3__Miss_Fault", "desc": "PCAN 41C 报文丢失"},
+(202, 4): {"name": "PB_42F_Body_Information_16__Miss_Fault", "desc": "PCAN 42F 报文丢失"},
+(202, 5): {"name": "PB_42F_TireRFPrsV_Fault", "desc": "TireRFPrsV有效性故障"},
+(202, 6): {"name": "PB_42F_TireLFPrsV_Fault", "desc": "OtsAirTmpV有效性故障"},
+(202, 7): {"name": "PB_42F_TireRRPrsV_Fault", "desc": "OtsAirTmpV有效性故障"},
+(203, 0): {"name": "PB_42F_TireLRPrsV_Fault", "desc": "OtsAirTmpV有效性故障"},
+(203, 1): {"name": "CCB_4DD_SD_Navigation_Status__Miss_Fault", "desc": "CCAN 4DD 报文丢失"},
+(203, 2): {"name": "PB_538_Vehicle_Odometer__Miss_Fault", "desc": "PCAN 538 报文丢失"},
+(203, 3): {"name": "PB_538_VehOdoV_Fault", "desc": "VehOdoV有效性故障"},
+(203, 4): {"name": "PB_205_Electric_Park_Brake_Status__Miss_Fault", "desc": "PCAN 205 报文丢失"},
+(203, 5): {"name": "PB_205_PrtdEPBSwStatARC_Fault", "desc": "PrtdEPBSwStatARC通信校验故障"},
+(203, 6): {"name": "PB_205_AutBrkReqStat2ARC_Fault", "desc": "AutBrkReqStat2ARC通信校验故障"},
+(203, 7): {"name": "S2_0x6BC0001_LRR_SP_OperationMode_Fault", "desc": "前向毫米波雷达错误信息校验"},
+(204, 0): {"name": "S2_0xDFC0005_LRR_VINMismatched_Fault", "desc": "前向毫米波雷达错误信息校验"},
+(204, 1): {"name": "S2_0xDFC0005_LRR_Fault_Miss_Msg_Fault", "desc": "前向毫米波雷达0xDFC0005报文丢失"},
+(204, 2): {"name": "S2_0xDFC0005_LRR_Flt_CRC_Fault", "desc": "前向毫米波雷达通信校验异常"},
+(204, 3): {"name": "S2_0x6BC0001_LRR_SP_OperationMode_Fault", "desc": "前向毫米波雷达遮挡/致盲"},
+(204, 4): {"name": "S1_0xDFC0007_SRR_RR_Fault_Miss_Msg_Fault", "desc": "右后角雷达0xDFC0007报文丢失"},
+(204, 5): {"name": "S1_0xDFC0007_SRR_RR_Flt_CRC_Fault", "desc": "右后角雷达雷达通信校验异常"},
+(204, 6): {"name": "S1_0x6BC0003_SRR_RR_SYS_PERFORM_Miss_Msg_Fault", "desc": "右后角雷达0x6BC0003报文丢失"},
+(204, 7): {"name": "S1_0x6BC0003_SRR_RR_SYS_PERFORM_CRC_Fault", "desc": "右后角雷达雷达通信校验异常"},
+(205, 0): {"name": "S1_0x6BC0003_SRR_RR_SP_OperationMode_Fault", "desc": "右后角雷达雷达错误信息校验"},
+(205, 1): {"name": "PB_036_IMULatAccPrimV_Fault", "desc": "IMULatAccPrimV有效性校验"},
+(205, 2): {"name": "PB_036_IMUYawRtPriV_Fault", "desc": "IMUYawRtPriV有效性校验"},
+(205, 3): {"name": "PB_038_IMULonAccPriV_Fault", "desc": "IMULonAccPriV有效性校验"},
+(205, 4): {"name": "Reserved", "desc": ""},
+(205, 5): {"name": "PB_191_ABFI_CollPrepSysInhbt_Fault", "desc": "制动系统异常（行车）"},
+(205, 6): {"name": "PB_044_FSRACCBrkngReqDenied_Fault", "desc": "FSRACCBrkngReqDenied通信故障"},
+(205, 7): {"name": "PB_191_BPDAPS_BkPDrvApPV_Fault", "desc": "制动系统异常（行车）"},
+(206, 0): {"name": "PB_031_BrkPedAppV_Fault", "desc": "BrkPedAppV检验故障"},
+(206, 1): {"name": "PB_191_ElecPrkBrkStat_Fault", "desc": "制动系统异常（行车）"},
+(206, 2): {"name": "PB_0AC_VhDynCntlSysSt_Fault", "desc": "VhDynCntlSysSt故障"},
+(206, 3): {"name": "PB_044_BrkSysAutBrkStat_Fault", "desc": "BrkSysAutBrkStat通信故障"},
+(206, 4): {"name": "PB_0C2_ACCATCS_RqStat _Fault", "desc": "针对AEB功能的动力系统故障"},
+(206, 5): {"name": "PB_208_VehSpdAvgNDrvnV_Fault", "desc": "VehSpdAvgNDrvnV通信有效校验故障"},
+(206, 6): {"name": "Reserved", "desc": ""},
+(206, 7): {"name": "PB_076_TARS_TransActRngV_ICE_Fault", "desc": "TARS_TransActRngV_ICE通信校验故障"},
+(207, 0): {"name": "PB_054_StrWhAngGrdV_Fault", "desc": "EPS控制功能故障（行车）"},
+(207, 1): {"name": "S1_0xDFC0006_SRR_RL_Fault_Miss_Msg_Fault", "desc": "左后角雷达0xDFC0006报文丢失"},
+(207, 2): {"name": "S1_0xDFC0006_SRR_RL_Flt_CRC_Fault", "desc": "左后角雷达雷达通信校验异常"},
+(207, 3): {"name": "S1_0x6BC0002_SRR_RL_SYS_PERFORM_Miss_Msg_Fault", "desc": "左后角雷达0x6BC0002报文丢失"},
+(207, 4): {"name": "S1_0x6BC0002_SRR_RL_SYS_PERFORM_CRC_Fault", "desc": "左后角雷达雷达通信校验异常"},
+(207, 5): {"name": "S1_0x6BC0002_SRR_RL_SP_OperationMode_Fault", "desc": "左后角雷达雷达错误信息校验"},
+(207, 6): {"name": "Reserved", "desc": ""},
+(207, 7): {"name": "Reserved", "desc": ""},
+(208, 0): {"name": "Reserved", "desc": ""},
+(208, 1): {"name": "Reserved", "desc": ""},
+(208, 2): {"name": "CB_071_ESAPACP_ElecShfAPACtlStsAuth_ICE_Fault", "desc": "ESAPACP_ElecShfAPACtlStsAuth_ICE通信校验故障"},
+(208, 3): {"name": "PB_132_BSAPABPARC_ICE2_Fault", "desc": "BSAPABPARC_ICE2通信校验故障"},
+(208, 4): {"name": "PB_132_EPBSP_ElecPrkBrkAvlStsAuth_ICE2_Fault", "desc": "EPBSP_ElecPrkBrkAvlStsAuth_ICE2信号校验故障"},
+(208, 5): {"name": "CB_0C8_TransEstGearV_TCM_Fault", "desc": "ICE车型：行车档位状态无效"},
+(208, 6): {"name": "", "desc": "PHEV/BEV车型：泊车档位状态无效"},
+(208, 7): {"name": "", "desc": "ICE车型：泊车档位状态无效"},
+(209, 0): {"name": "PB_068_WhlSpdVelLFrtAuthV_ICE2_Fault", "desc": "WhlSpdVelLFrtAuthV_ICE2校验故障"},
+(209, 1): {"name": "PB_068_WhlAngVelRFrtAuthV_ICE2_Fault", "desc": "WhlAngVelRFrtAuthV_ICE2校验故障"},
+(209, 2): {"name": "PB_068_WhlSpdVelLRrAuthV_ICE2_Fault", "desc": "WhlSpdVelLRrAuthV_ICE2检验故障"},
+(209, 3): {"name": "PB_068_WhlSpdVelRRrAuthV_ICE2_Fault", "desc": "WhlSpdVelRRrAuthV_ICE2检验故障"},
+(209, 4): {"name": "PB_068_BrkPedAppV_ICE2_Fault", "desc": "WhlAngVelRRrAuthV检验故障"},
+(209, 5): {"name": "PB_0AE_BrkPdlDrvAppPrsDetcdV_ICE2_Fault", "desc": "制动踏板故障"},
+(209, 6): {"name": "PB_0AE_ABSFld_ICE2_Fault", "desc": "ABS故障"},
+(209, 7): {"name": "PB_0AE_VhDynCntlSysSt_ICE2_Fault", "desc": "VhDynCntlSysSt_ICE2故障"},
+(210, 0): {"name": "PB_078_TARS_TransActRngV__Fault", "desc": "TARS_TransActRngV有效性验证故障"},
+(210, 1): {"name": "", "desc": ""},
+(210, 2): {"name": "", "desc": ""},
+(210, 3): {"name": "", "desc": ""},
+(210, 4): {"name": "", "desc": ""},
+(210, 5): {"name": "", "desc": ""},
+(210, 6): {"name": "", "desc": ""},
+(210, 7): {"name": "", "desc": ""},
+(211, 0): {"name": "", "desc": ""},
+(211, 1): {"name": "", "desc": ""},
+(211, 2): {"name": "", "desc": ""},
+(211, 3): {"name": "", "desc": ""},
+(211, 4): {"name": "", "desc": ""},
+(211, 5): {"name": "", "desc": ""},
+(211, 6): {"name": "", "desc": ""},
+(211, 7): {"name": "", "desc": ""},
+(212, 0): {"name": "", "desc": ""},
+(212, 1): {"name": "", "desc": ""},
+(212, 2): {"name": "", "desc": ""},
+(212, 3): {"name": "", "desc": ""},
+(212, 4): {"name": "", "desc": ""},
+(212, 5): {"name": "", "desc": ""},
+(212, 6): {"name": "", "desc": ""},
+(212, 7): {"name": "", "desc": ""},
+(213, 0): {"name": "", "desc": ""},
+(213, 1): {"name": "", "desc": ""},
+(213, 2): {"name": "", "desc": ""},
+(213, 3): {"name": "", "desc": ""},
+(213, 4): {"name": "", "desc": ""},
+(213, 5): {"name": "", "desc": ""},
+(213, 6): {"name": "", "desc": ""},
+(213, 7): {"name": "", "desc": ""},
+(214, 0): {"name": "", "desc": ""},
+(214, 1): {"name": "", "desc": ""},
+(214, 2): {"name": "", "desc": ""},
+(214, 3): {"name": "", "desc": ""},
+(214, 4): {"name": "", "desc": ""},
+(214, 5): {"name": "", "desc": ""},
+(214, 6): {"name": "", "desc": ""},
+(214, 7): {"name": "", "desc": ""},
+(215, 0): {"name": "", "desc": ""},
+(215, 1): {"name": "", "desc": ""},
+(215, 2): {"name": "", "desc": ""},
+(215, 3): {"name": "", "desc": ""},
+(215, 4): {"name": "", "desc": ""},
+(215, 5): {"name": "", "desc": ""},
+(215, 6): {"name": "", "desc": ""},
+(215, 7): {"name": "", "desc": ""},
+(216, 0): {"name": "", "desc": ""},
+(216, 1): {"name": "", "desc": ""},
+(216, 2): {"name": "", "desc": ""},
+(216, 3): {"name": "", "desc": ""},
+(216, 4): {"name": "", "desc": ""},
+(216, 5): {"name": "", "desc": ""},
+(216, 6): {"name": "", "desc": ""},
+(216, 7): {"name": "", "desc": ""},
+(217, 0): {"name": "", "desc": ""},
+(217, 1): {"name": "", "desc": ""},
+(217, 2): {"name": "", "desc": ""},
+(217, 3): {"name": "", "desc": ""},
+(217, 4): {"name": "", "desc": ""},
+(217, 5): {"name": "", "desc": ""},
+(217, 6): {"name": "", "desc": ""},
+(217, 7): {"name": "", "desc": ""},
+(218, 0): {"name": "", "desc": ""},
+(218, 1): {"name": "", "desc": ""},
+(218, 2): {"name": "", "desc": ""},
+(218, 3): {"name": "", "desc": ""},
+(218, 4): {"name": "", "desc": ""},
+(218, 5): {"name": "", "desc": ""},
+(218, 6): {"name": "", "desc": ""},
+(218, 7): {"name": "", "desc": ""},
+(219, 0): {"name": "", "desc": ""},
+(219, 1): {"name": "", "desc": ""},
+(219, 2): {"name": "", "desc": ""},
+(219, 3): {"name": "", "desc": ""},
+(219, 4): {"name": "", "desc": ""},
+(219, 5): {"name": "", "desc": ""},
+(219, 6): {"name": "", "desc": ""},
+(219, 7): {"name": "", "desc": ""},
+(220, 0): {"name": "", "desc": ""},
+(220, 1): {"name": "", "desc": ""},
+(220, 2): {"name": "", "desc": ""},
+(220, 3): {"name": "", "desc": ""},
+(220, 4): {"name": "", "desc": ""},
+(220, 5): {"name": "", "desc": ""},
+(220, 6): {"name": "", "desc": ""},
+(220, 7): {"name": "", "desc": ""},
+(221, 0): {"name": "", "desc": ""},
+(221, 1): {"name": "", "desc": ""},
+(221, 2): {"name": "", "desc": ""},
+(221, 3): {"name": "", "desc": ""},
+(221, 4): {"name": "", "desc": ""},
+(221, 5): {"name": "", "desc": ""},
+(221, 6): {"name": "", "desc": ""},
+(221, 7): {"name": "", "desc": ""},
+(222, 0): {"name": "", "desc": ""},
+(222, 1): {"name": "", "desc": ""},
+(222, 2): {"name": "", "desc": ""},
+(222, 3): {"name": "", "desc": ""},
+(222, 4): {"name": "", "desc": ""},
+(222, 5): {"name": "", "desc": ""},
+(222, 6): {"name": "", "desc": ""},
+(222, 7): {"name": "", "desc": ""},
+(223, 0): {"name": "", "desc": ""},
+(223, 1): {"name": "", "desc": ""},
+(223, 2): {"name": "", "desc": ""},
+(223, 3): {"name": "", "desc": ""},
+(223, 4): {"name": "", "desc": ""},
+(223, 5): {"name": "", "desc": ""},
+(223, 6): {"name": "", "desc": ""},
+(223, 7): {"name": "", "desc": ""},
+(224, 0): {"name": "", "desc": ""},
+(224, 1): {"name": "", "desc": ""},
+(224, 2): {"name": "", "desc": ""},
+(224, 3): {"name": "", "desc": ""},
+(224, 4): {"name": "", "desc": ""},
+(224, 5): {"name": "", "desc": ""},
+(224, 6): {"name": "", "desc": ""},
+(224, 7): {"name": "", "desc": ""},
+(225, 0): {"name": "", "desc": ""},
+(225, 1): {"name": "", "desc": ""},
+(225, 2): {"name": "", "desc": ""},
+(225, 3): {"name": "", "desc": ""},
+(225, 4): {"name": "", "desc": ""},
+(225, 5): {"name": "", "desc": ""},
+(225, 6): {"name": "", "desc": ""},
+(225, 7): {"name": "", "desc": ""},
+(226, 0): {"name": "", "desc": ""},
+(226, 1): {"name": "", "desc": ""},
+(226, 2): {"name": "", "desc": ""},
+(226, 3): {"name": "", "desc": ""},
+(226, 4): {"name": "", "desc": ""},
+(226, 5): {"name": "", "desc": ""},
+(226, 6): {"name": "", "desc": ""},
+(226, 7): {"name": "", "desc": ""},
+(227, 0): {"name": "", "desc": ""},
+(227, 1): {"name": "", "desc": ""},
+(227, 2): {"name": "", "desc": ""},
+(227, 3): {"name": "", "desc": ""},
+(227, 4): {"name": "", "desc": ""},
+(227, 5): {"name": "", "desc": ""},
+(227, 6): {"name": "", "desc": ""},
+(227, 7): {"name": "", "desc": ""},
+(228, 0): {"name": "", "desc": ""},
+(228, 1): {"name": "", "desc": ""},
+(228, 2): {"name": "", "desc": ""},
+(228, 3): {"name": "", "desc": ""},
+(228, 4): {"name": "", "desc": ""},
+(228, 5): {"name": "", "desc": ""},
+(228, 6): {"name": "", "desc": ""},
+(228, 7): {"name": "", "desc": ""},
+(229, 0): {"name": "", "desc": ""},
+(229, 1): {"name": "", "desc": ""},
+(229, 2): {"name": "", "desc": ""},
+(229, 3): {"name": "", "desc": ""},
+(229, 4): {"name": "", "desc": ""},
+(229, 5): {"name": "", "desc": ""},
+(229, 6): {"name": "", "desc": ""},
+(229, 7): {"name": "", "desc": ""},
+(230, 0): {"name": "", "desc": ""},
+(230, 1): {"name": "", "desc": ""},
+(230, 2): {"name": "", "desc": ""},
+(230, 3): {"name": "", "desc": ""},
+(230, 4): {"name": "", "desc": ""},
+(230, 5): {"name": "", "desc": ""},
+(230, 6): {"name": "", "desc": ""},
+(230, 7): {"name": "", "desc": ""},
+(231, 0): {"name": "", "desc": ""},
+(231, 1): {"name": "", "desc": ""},
+(231, 2): {"name": "", "desc": ""},
+(231, 3): {"name": "", "desc": ""},
+(231, 4): {"name": "", "desc": ""},
+(231, 5): {"name": "", "desc": ""},
+(231, 6): {"name": "", "desc": ""},
+(231, 7): {"name": "", "desc": ""},
+(232, 0): {"name": "", "desc": ""},
+(232, 1): {"name": "", "desc": ""},
+(232, 2): {"name": "", "desc": ""},
+(232, 3): {"name": "", "desc": ""},
+(232, 4): {"name": "", "desc": ""},
+(232, 5): {"name": "", "desc": ""},
+(232, 6): {"name": "", "desc": ""},
+(232, 7): {"name": "", "desc": ""},
+(233, 0): {"name": "", "desc": ""},
+(233, 1): {"name": "", "desc": ""},
+(233, 2): {"name": "", "desc": ""},
+(233, 3): {"name": "", "desc": ""},
+(233, 4): {"name": "", "desc": ""},
+(233, 5): {"name": "", "desc": ""},
+(233, 6): {"name": "", "desc": ""},
+(233, 7): {"name": "", "desc": ""},
+(234, 0): {"name": "", "desc": ""},
+(234, 1): {"name": "", "desc": ""},
+(234, 2): {"name": "", "desc": ""},
+(234, 3): {"name": "", "desc": ""},
+(234, 4): {"name": "", "desc": ""},
+(234, 5): {"name": "", "desc": ""},
+(234, 6): {"name": "", "desc": ""},
+(234, 7): {"name": "", "desc": ""},
+(235, 0): {"name": "", "desc": ""},
+(235, 1): {"name": "", "desc": ""},
+(235, 2): {"name": "", "desc": ""},
+(235, 3): {"name": "", "desc": ""},
+(235, 4): {"name": "", "desc": ""},
+(235, 5): {"name": "", "desc": ""},
+(235, 6): {"name": "", "desc": ""},
+(235, 7): {"name": "", "desc": ""},
+(236, 0): {"name": "", "desc": ""},
+(236, 1): {"name": "", "desc": ""},
+(236, 2): {"name": "", "desc": ""},
+(236, 3): {"name": "", "desc": ""},
+(236, 4): {"name": "", "desc": ""},
+(236, 5): {"name": "", "desc": ""},
+(236, 6): {"name": "", "desc": ""},
+(236, 7): {"name": "", "desc": ""},
+(237, 0): {"name": "", "desc": ""},
+(237, 1): {"name": "", "desc": ""},
+(237, 2): {"name": "", "desc": ""},
+(237, 3): {"name": "", "desc": ""},
+(237, 4): {"name": "", "desc": ""},
+(237, 5): {"name": "", "desc": ""},
+(237, 6): {"name": "", "desc": ""},
+(237, 7): {"name": "", "desc": ""},
+(238, 0): {"name": "", "desc": ""},
+(238, 1): {"name": "", "desc": ""},
+(238, 2): {"name": "", "desc": ""},
+(238, 3): {"name": "", "desc": ""},
+(238, 4): {"name": "", "desc": ""},
+(238, 5): {"name": "", "desc": ""},
+(238, 6): {"name": "", "desc": ""},
+(238, 7): {"name": "", "desc": ""},
+(239, 0): {"name": "", "desc": ""},
+(239, 1): {"name": "", "desc": ""},
+(239, 2): {"name": "", "desc": ""},
+(239, 3): {"name": "", "desc": ""},
+(239, 4): {"name": "", "desc": ""},
+(239, 5): {"name": "", "desc": ""},
+(239, 6): {"name": "", "desc": ""},
+(239, 7): {"name": "", "desc": ""},
+(240, 0): {"name": "", "desc": ""},
+(240, 1): {"name": "", "desc": ""},
+(240, 2): {"name": "", "desc": ""},
+(240, 3): {"name": "", "desc": ""},
+(240, 4): {"name": "", "desc": ""},
+(240, 5): {"name": "", "desc": ""},
+(240, 6): {"name": "", "desc": ""},
+(240, 7): {"name": "", "desc": ""},
+(241, 0): {"name": "", "desc": ""},
+(241, 1): {"name": "", "desc": ""},
+(241, 2): {"name": "", "desc": ""},
+(241, 3): {"name": "", "desc": ""},
+(241, 4): {"name": "", "desc": ""},
+(241, 5): {"name": "", "desc": ""},
+(241, 6): {"name": "", "desc": ""},
+(241, 7): {"name": "", "desc": ""},
+(242, 0): {"name": "", "desc": ""},
+(242, 1): {"name": "", "desc": ""},
+(242, 2): {"name": "", "desc": ""},
+(242, 3): {"name": "", "desc": ""},
+(242, 4): {"name": "", "desc": ""},
+(242, 5): {"name": "", "desc": ""},
+(242, 6): {"name": "", "desc": ""},
+(242, 7): {"name": "", "desc": ""},
+(243, 0): {"name": "", "desc": ""},
+(243, 1): {"name": "", "desc": ""},
+(243, 2): {"name": "", "desc": ""},
+(243, 3): {"name": "", "desc": ""},
+(243, 4): {"name": "", "desc": ""},
+(243, 5): {"name": "", "desc": ""},
+(243, 6): {"name": "", "desc": ""},
+(243, 7): {"name": "", "desc": ""},
+(244, 0): {"name": "", "desc": ""},
+(244, 1): {"name": "", "desc": ""},
+(244, 2): {"name": "", "desc": ""},
+(244, 3): {"name": "", "desc": ""},
+(244, 4): {"name": "", "desc": ""},
+(244, 5): {"name": "", "desc": ""},
+(244, 6): {"name": "", "desc": ""},
+(244, 7): {"name": "", "desc": ""},
+(245, 0): {"name": "", "desc": ""},
+(245, 1): {"name": "", "desc": ""},
+(245, 2): {"name": "", "desc": ""},
+(245, 3): {"name": "", "desc": ""},
+(245, 4): {"name": "", "desc": ""},
+(245, 5): {"name": "", "desc": ""},
+(245, 6): {"name": "", "desc": ""},
+(245, 7): {"name": "", "desc": ""},
+(246, 0): {"name": "", "desc": ""},
+(246, 1): {"name": "", "desc": ""},
+(246, 2): {"name": "", "desc": ""},
+(246, 3): {"name": "", "desc": ""},
+(246, 4): {"name": "", "desc": ""},
+(246, 5): {"name": "", "desc": ""},
+(246, 6): {"name": "", "desc": ""},
+(246, 7): {"name": "", "desc": ""},
+(247, 0): {"name": "", "desc": ""},
+(247, 1): {"name": "", "desc": ""},
+(247, 2): {"name": "", "desc": ""},
+(247, 3): {"name": "", "desc": ""},
+(247, 4): {"name": "", "desc": ""},
+(247, 5): {"name": "", "desc": ""},
+(247, 6): {"name": "", "desc": ""},
+(247, 7): {"name": "", "desc": ""},
+(248, 0): {"name": "", "desc": ""},
+(248, 1): {"name": "", "desc": ""},
+(248, 2): {"name": "", "desc": ""},
+(248, 3): {"name": "", "desc": ""},
+(248, 4): {"name": "", "desc": ""},
+(248, 5): {"name": "", "desc": ""},
+(248, 6): {"name": "", "desc": ""},
+(248, 7): {"name": "", "desc": ""},
+(249, 0): {"name": "", "desc": ""},
+(249, 1): {"name": "", "desc": ""},
+(249, 2): {"name": "", "desc": ""},
+(249, 3): {"name": "", "desc": ""},
+(249, 4): {"name": "", "desc": ""},
+(249, 5): {"name": "", "desc": ""},
+(249, 6): {"name": "", "desc": ""},
+(249, 7): {"name": "", "desc": ""},
+(250, 0): {"name": "", "desc": ""},
+(250, 1): {"name": "", "desc": ""},
+(250, 2): {"name": "", "desc": ""},
+(250, 3): {"name": "", "desc": ""},
+(250, 4): {"name": "", "desc": ""},
+(250, 5): {"name": "", "desc": ""},
+(250, 6): {"name": "", "desc": ""},
+(250, 7): {"name": "", "desc": ""},
+(251, 0): {"name": "", "desc": ""},
+(251, 1): {"name": "", "desc": ""},
+(251, 2): {"name": "", "desc": ""},
+(251, 3): {"name": "", "desc": ""},
+(251, 4): {"name": "", "desc": ""},
+(251, 5): {"name": "", "desc": ""},
+(251, 6): {"name": "", "desc": ""},
+(251, 7): {"name": "", "desc": ""},
+(252, 0): {"name": "", "desc": ""},
+(252, 1): {"name": "", "desc": ""},
+(252, 2): {"name": "", "desc": ""},
+(252, 3): {"name": "", "desc": ""},
+(252, 4): {"name": "", "desc": ""},
+(252, 5): {"name": "", "desc": ""},
+(252, 6): {"name": "", "desc": ""},
+(252, 7): {"name": "", "desc": ""},
+(253, 0): {"name": "", "desc": ""},
+(253, 1): {"name": "", "desc": ""},
+(253, 2): {"name": "", "desc": ""},
+(253, 3): {"name": "", "desc": ""},
+(253, 4): {"name": "", "desc": ""},
+(253, 5): {"name": "", "desc": ""},
+(253, 6): {"name": "", "desc": ""},
+(253, 7): {"name": "", "desc": ""},
+(254, 0): {"name": "", "desc": ""},
+(254, 1): {"name": "", "desc": ""},
+(254, 2): {"name": "", "desc": ""},
+(254, 3): {"name": "", "desc": ""},
+(254, 4): {"name": "", "desc": ""},
+(254, 5): {"name": "", "desc": ""},
+(254, 6): {"name": "", "desc": ""},
+(254, 7): {"name": "", "desc": ""},
+(255, 0): {"name": "", "desc": ""},
+(255, 1): {"name": "", "desc": ""},
+(255, 2): {"name": "", "desc": ""},
+(255, 3): {"name": "", "desc": ""},
+(255, 4): {"name": "", "desc": ""},
+(255, 5): {"name": "", "desc": ""},
+(255, 6): {"name": "", "desc": ""},
+(255, 7): {"name": "", "desc": ""},
+}
+
+# ====================== DoIP ======================
+def build_routing_activation(source_addr: int) -> bytes:
+    header = b"\x02\xFD\x00\x05"
+    len_buf = struct.pack(">I", 7)
+    payload = struct.pack("!HB4s", source_addr, 0x00, b"\x00\x00\x00")
+    return header + len_buf + payload
+
+def build_diag_msg(src, dst, uds_data: bytes) -> bytes:
+    header = b"\x02\xFD\x80\x01"
+    len_buf = struct.pack(">I", 4 + len(uds_data))
+    addr_buf = struct.pack(">HH", src, dst)
+    return header + len_buf + addr_buf + uds_data
+
+# ✅ 修复：正确解析8002响应
+def extract_uds_data(doip_hex: str) -> str:
+    doip_hex = doip_hex.upper()
+    pos = doip.find("8002")
+    if pos != -1:
+        return doip[pos+12:]
+    pos = doip.find("8001")
+    if pos != -1:
+        return doip[pos+12:]
+    return doip
+
+# ====================== 连接 ======================
+def check_vehicle_connection():
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.8)
+        res = sock.connect_ex((GW_IP, UDS_PORT))
+        sock.close()
+        return res == 0
+    except:
+        return False
+
+# ====================== FDA解析 ======================
+def decode_fda3(hex_str):
+    try:
+        raw_bytes = bytes.fromhex(hex_str.strip())
+        fault_list = []
+        for byte_idx in range(len(raw_bytes)):
+            byte_val = raw_bytes[byte_idx]
+            for bit_idx in range(8):
+                if (byte_val >> (7 - bit_idx)) & 1:
+                    key = (byte_idx, bit_idx)
+                    fault_info = fda3_fault_db.get(key, {"name":"reserved","desc":"reserved"})
+                    fault_list.append({
+                        "byte": byte_idx+1,
+                        "bit": bit_idx+1,
+                        "name": fault_info["name"],
+                        "desc": fault_info["desc"]
+                    })
+        return fault_list
+    except:
+        return []
+
+# ✅ 修复：FDA3读取（不上1003、完整收包、正确解析62FDA3）
+def read_did(did_name):
+    try:
+        if did_name not in DID_MAP:
+            return {"log":"无效DID指令","faults":[]}
+        uds_cmd = DID_MAP[did_name]
+        log_list = []
+        now_time = datetime.now().strftime("%H:%M:%S")
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(15)
+        sock.connect((GW_IP, UDS_PORT))
+        log_list.append(f"[{now_time}] TCP连接建立成功")
+
+        # 路由激活
+        ra_pkt = build_routing_activation(SOURCE_ADDR)
+        sock.sendall(ra_pkt)
+        log_list.append(f"[{now_time}] 发送路由: {ra_pkt.hex().upper()}")
+        ra_resp = sock.recv(1024)
+        log_list.append(f"[{now_time}] 路由响应: {ra_resp.hex().upper()}")
+
+        # 直接发FDA（不上1003）
+        diag_pkt = build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, uds_cmd)
+        sock.sendall(diag_pkt)
+        log_list.append(f"[{now_time}] 发送{did_name}: {uds_cmd.hex().upper()}")
+
+        # ✅ 完整收包（解决截断问题）
+        recv_buf = b""
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            recv_buf += chunk
+            if len(chunk) < 4096:
+                break
+
+        recv_hex = recv_buf.hex().upper()
+        pure_uds = extract_uds_data(recv_hex)
+        log_list.append(f"[{now}] 完整响应: {recv_hex}")
+        log_list.append(f"[{now}] 解析UDS: {pure_uds}")
+
+        fault_result = []
+        # ✅ 严格匹配62FDA3
+        if "62FDA3" in recv_hex:
+            idx = recv_hex.find("62FDA3")
+            data_hex = recv_hex[idx+6:]
+            fault_result = decode_fda3(data_hex)
+
+        sock.close()
+        return {"log":"\n".join(log_list), "faults": fault_result}
+    except Exception as e:
+        return {"log":f"通信异常: {str(e)}","faults":[]}
+
+# ====================== 屏蔽 ======================
+def do_mask_process(step_data):
+    try:
+        log_list = []
+        ret_step = 0
+        ret_seed = ""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect((GW_IP, UDS_PORT))
+        log_list.append("建立TCP通信成功")
+
+        ra_pkt = build_routing_activation(SOURCE_ADDR)
+        sock.sendall(ra_pkt)
+        sock.recv(4096)
+
+        if step_data["step"] >= 1:
+            pkt1 = build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, bytes.fromhex("1003"))
+            sock.sendall(pkt1)
+            log_list.append(f"发送10 03会话: 1003")
+            resp1 = sock.recv(1024)
+            log_list.append(f"1003响应: {extract_uds_data(resp1.hex().upper())}")
+            ret_step = 1
+
+        if step_data["step"] >= 2:
+            pkt2 = build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, bytes.fromhex("3E80"))
+            sock.sendall(pkt2)
+            log_list.append(f"发送3E 80保活: 3E80")
+            resp2 = sock.recv(1024)
+            log_list.append(f"3E80响应: {extract_uds_data(resp2.hex().upper())}")
+            ret_step = 2
+
+        if step_data["step"] >= 3:
+            pkt3 = build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, bytes.fromhex("2701"))
+            sock.sendall(pkt3)
+            log_list.append(f"发送27 01请求: 2701")
+            resp3 = sock.recv(1024).hex().upper()
+            log_list.append(f"2701响应: {extract_uds_data(resp3)}")
+            if "6701" in resp3:
+                ret_seed = resp3[resp3.find("6701")+4:]
+            ret_step = 3
+
+        if step_data["step"] >=4 and step_data.get("key"):
+            key_str = step_data.get("key","").strip().upper()
+            cmd4 = bytes.fromhex(f"2702{key_str}")
+            pkt4 = build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, cmd4)
+            sock.sendall(pkt4)
+            log_list.append(f"发送27 02密钥: {key_str}")
+            time.sleep(0.3)
+            resp4 = sock.recv(1024)
+            log_list.append(f"密钥响应: {extract_uds_data(resp4.hex().upper())}")
+            ret_step =4
+
+        if step_data["step"] >=5:
+            full_fill = bytes.fromhex("F"*512)
+            cmd5 = b"\x2E\xFD\x00" + full_fill
+            pkt5 = build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, cmd5)
+            sock.sendall(pkt5)
+            log_list.append(f"发送2E FD 00屏蔽指令")
+            time.sleep(1)
+            resp5 = sock.recv(1024)
+            log_list.append(f"屏蔽00响应: {extract_uds_data(resp5.hex().upper())}")
+            ret_step =5
+
+        if step_data["step"] >=6:
+            full_fill2 = bytes.fromhex("F"*512)
+            cmd6 = b"\x2E\xFD\x01" + full_fill2
+            pkt6 = build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, cmd6)
+            sock.sendall(pkt6)
+            log_list.append(f"发送2E FD 01屏蔽指令")
+            time.sleep(1)
+            resp6 = sock.recv(1024)
+            log_list.append(f"屏蔽01响应: {extract_uds_data(resp6.hex().upper())}")
+            ret_step =6
+
+        sock.close()
+        return {"status":"ok","log":"\n".join(log_list),"step":ret_step,"seed":ret_seed}
+    except Exception as e:
+        return {"status":"err","log":f"执行失败: {str(e)}","step":0,"seed":""}
+
+# ====================== 自定义 ======================
+def keep_alive_loop(sock):
+    global keep_alive_flag
+    while keep_alive_flag:
+        try:
+            pkt = build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, bytes.fromhex("3E80"))
+            sock.sendall(pkt)
+            time.sleep(1)
+        except:
+            break
+
+def send_custom_uds_cmds(cmd_text:str) -> str:
+    global keep_alive_flag
+    lines = [line.strip().upper() for line in cmd_text.splitlines() if line.strip()]
+    if not lines:
+        return "未输入任何诊断指令"
+    log_buf = []
+    now_base = datetime.now().strftime("%H:%M:%S")
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(20)
+        sock.connect((GW_IP, UDS_PORT))
+        log_buf.append(f"[{now_base}] 自定义诊断：建立TCP连接成功")
+
+        ra_pkt = build_routing_activation(SOURCE_ADDR)
+        sock.sendall(ra_pkt)
+        ra_resp = sock.recv(2048)
+        log_buf.append(f"[{now_base}] 路由激活完成，响应：{ra_resp.hex().upper()}")
+
+        keep_alive_flag = True
+        threading.Thread(target=keep_alive_loop, args=(sock,), daemon=True).start()
+        log_buf.append("已开启自动保活：每隔1s自动发送3E 80")
+
+        for idx, hex_cmd in enumerate(lines):
+            t_str = datetime.now().strftime("%H:%M:%S")
+            try:
+                uds_bytes = bytes.fromhex(hex_cmd)
+                doip_pkt = build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, uds_bytes)
+                sock.sendall(doip_pkt)
+                log_buf.append(f"\n[{t_str}] 发送指令：{hex_cmd}")
+                resp = sock.recv(2048)
+                pure_data = extract_uds_data(resp.hex().upper())
+                log_buf.append(f"[{t_str}] 回复有效报文：{pure_data}")
+            except Exception as e:
+                log_buf.append(f"[{t_str}] 指令{hex_cmd}发送异常：{str(e)}")
+            if idx != len(lines)-1:
+                time.sleep(3)
+
+        keep_alive_flag = False
+        sock.close()
+        return "\n".join(log_buf)
+    except Exception as e:
+        keep_alive_flag = False
+        return f"自定义诊断连接失败：{str(e)}"
+
+# ====================== 整车故障读写 ======================
+def read_all_dtc() -> str:
+    log_list = []
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(15)
+        sock.connect((GW_IP, UDS_PORT))
+        log_list.append("建立整车诊断连接成功")
+        sock.sendall(build_routing_activation(SOURCE_ADDR))
+        sock.recv(2048)
+
+        sock.sendall(build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, bytes.fromhex("1001")))
+        log_list.append("发送10 01默认会话")
+        log_list.append(f"响应：{extract_uds_data(sock.recv(1024).hex().upper())}")
+        time.sleep(0.2)
+
+        dtc_cmd = bytes.fromhex("1902")
+        sock.sendall(build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, dtc_cmd))
+        log_list.append("发送19 02 读取当前故障码")
+        dtc_resp = sock.recv(4096).hex().upper()
+        log_list.append(f"故障码列表：{extract_uds_data(dtc_resp)}")
+        sock.close()
+        return "\n".join(log_list)
+    except Exception as e:
+        return f"读取故障失败：{str(e)}"
+
+def clear_all_dtc() -> str:
+    log_list = []
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(15)
+        sock.connect((GW_IP, UDS_PORT))
+        log_list.append("建立整车诊断连接成功")
+        sock.sendall(build_routing_activation(SOURCE_ADDR))
+        sock.recv(2048)
+
+        sock.sendall(build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, bytes.fromhex("1001")))
+        log_list.append("进入默认会话")
+        sock.recv(1024)
+        time.sleep(0.2)
+
+        clear_cmd = bytes.fromhex("14FFFFFF")
+        sock.sendall(build_diag_msg(SOURCE_ADDR, TARGET_ADDR_ADM, clear_cmd))
+        log_list.append("发送14 FF FF FF 清除所有故障")
+        clear_resp = sock.recv(1024).hex().upper()
+        log_list.append(f"清除结果：{extract_uds_data(clear_resp)}")
+        sock.close()
+        return "\n".join(log_list)
+    except Exception as e:
+        return f"清除故障失败：{str(e)}"
+
+# ====================== 前端（原界面完全不变）======================
+@app.route('/')
+def index():
+    return render_template_string('''
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>L2 J6B综合诊断工具</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: "Microsoft YaHei", sans-serif;
+        }
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            background: #dce2ed;
+            display: flex;
+            flex-direction: column;
+        }
+        .wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px 20px;
+        }
+        .container {
+            width: 900px;
+            background: rgba(255,255,255,0.72);
+            border-radius: 30px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+            padding: 36px;
+            border: 1px solid rgba(255,255,255,0.8);
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 28px;
+        }
+        .title {
+            font-size: 26px;
+            font-weight: 700;
+            color: #1d1d1f;
+        }
+        .status-pill {
+            padding: 8px 14px;
+            border-radius: 999px;
+            font-size: 14px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .status-online {
+            background: rgba(52,199,89,0.15);
+            color: #097c2c;
+        }
+        .status-offline {
+            background: rgba(255,59,48,0.15);
+            color: #c71710;
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            animation: pulse 1.6s infinite;
+        }
+        .status-online .status-dot {
+            background: #34c759;
+        }
+        .status-offline .status-dot {
+            background: #ff3b30;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: .4; transform: scale(.9); }
+        }
+        .segmented {
+            display: flex;
+            background: rgba(0,0,0,0.05);
+            border-radius: 14px;
+            padding: 4px;
+            position: relative;
+            height: 52px;
+            margin-bottom: 28px;
+            z-index: 1;
+        }
+        .seg-slider {
+            position: absolute;
+            top: 4px;
+            left: 4px;
+            width: calc(25% - 4px);
+            height: 44px;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+            transition: transform 0.35s;
+            z-index: 1;
+        }
+        .seg-item {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 15px;
+            font-weight: 600;
+            color: #86868b;
+            cursor: pointer;
+            position: relative;
+            z-index: 10;
+            transition: 0.2s;
+        }
+        .seg-item:active {
+            transform: scale(0.97);
+        }
+        .seg-item.active {
+            color: #1d1d1f !important;
+        }
+        .seg-1 .seg-slider { transform: translateX(0); }
+        .seg-2 .seg-slider { transform: translateX(100%); }
+        .seg-3 .seg-slider { transform: translateX(200%); }
+        .seg-4 .seg-slider { transform: translateX(300%); }
+        .panel {
+            display: none;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: all .35s;
+        }
+        .panel.active {
+            display: block;
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .btn-grid {
+            display: grid;
+            grid-template-columns: repeat(3,1fr);
+            gap: 14px;
+            margin-bottom: 24px;
+        }
+        .func-btn {
+            height: 58px;
+            border: none;
+            border-radius: 14px;
+            background: #fff;
+            font-size: 15px;
+            font-weight: 600;
+            color: #007bff;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .func-btn:hover {
+            background: #f0f7ff;
+        }
+        .func-btn:active {
+            transform: scale(0.97);
+        }
+        .step-card {
+            background: rgba(255,255,255,0.9);
+            border-radius: 16px;
+            padding: 18px 20px;
+            margin-bottom: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+        }
+        .step-done {
+            background: rgba(52,199,89,0.12);
+        }
+        .step-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #1d1d1f;
+        }
+        .seed-box {
+            background: #f2f2f7;
+            border-radius: 12px;
+            padding: 12px 14px;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+        .key-input {
+            width: 100%;
+            margin-top: 10px;
+            padding: 12px 14px;
+            border-radius: 12px;
+            border: 1px solid #d2d2d7;
+            font-size: 14px;
+            outline: none;
+        }
+        .btn-run {
+            margin-top: 10px;
+            width: 100%;
+            height: 44px;
+            border-radius: 12px;
+            background: #007bff;
+            color: #fff;
+            border: none;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .btn-run:active {
+            transform: scale(0.97);
+        }
+        .fault-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: #1d1d1f;
+            margin-bottom: 14px;
+        }
+        .fault-card {
+            background: #fff;
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 12px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.06);
+        }
+        .fault-name {
+            font-size: 16px;
+            font-weight: 700;
+            color: #1d1d1f;
+            margin-bottom: 4px;
+        }
+        .fault-desc {
+            font-size: 14px;
+            color: #86868b;
+        }
+        .custom-textarea {
+            width: 100%;
+            height: 220px;
+            padding: 16px;
+            border-radius: 16px;
+            border: 1px solid #d2d2d7;
+            background: #f9f9fb;
+            outline: none;
+            font-size: 13px;
+            line-height: 1.8;
+            resize: none;
+            margin-bottom: 16px;
+        }
+        .custom-tip {
+            font-size: 13px;
+            color: #6e6e73;
+            margin-bottom: 12px;
+            line-height: 1.6;
+        }
+        .log-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 32px;
+            margin-bottom: 12px;
+        }
+        .log-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: #1d1d1f;
+        }
+        .log-btn {
+            width: 36px;
+            height: 36px;
+            border-radius: 12px;
+            background: rgba(0,0,0,0.05);
+            border: none;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .log-btn:hover {
+            background: rgba(0,0,0,0.1);
+        }
+        .log-btn:active {
+            transform: scale(0.97);
+        }
+        .log-box {
+            background: #1d1d1f;
+            color: #f2f2f7;
+            border-radius: 16px;
+            padding: 20px;
+            min-height: 120px;
+            max-height: 420px;
+            overflow-y: auto;
+            font-family: "Microsoft YaHei", Consolas, sans-serif !important;
+            font-size: 12px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+        .loading {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.2);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 999;
+        }
+        .loading-box {
+            background: rgba(255,255,255,0.9);
+            border-radius: 16px;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+        }
+        .spinner {
+            width: 36px;
+            height: 36px;
+            border: 3px solid #e1e1e2;
+            border-top: 3px solid #007bff;
+            border-radius: 50%;
+            animation: spin .8s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        footer {
+            text-align: center;
+            font-size: 12px;
+            color: #86868b;
+            padding: 12px 20px 20px;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div class="wrapper">
+        <div class="container">
+            <div class="header">
+                <div class="title">L2 J6B综合诊断工具</div>
+                <div id="status" class="status-pill status-offline">
+                    <div class="status-dot"></div><span>加载中</span>
+                </div>
+            </div>
+
+            <div class="segmented seg-1" id="segMain">
+                <div class="seg-slider"></div>
+                <div class="seg-item active" onclick="switchTab(0)">ADM故障诊断</div>
+                <div class="seg-item" onclick="switchTab(1)">ADM故障屏蔽</div>
+                <div class="seg-item" onclick="switchTab(2)">ADM自定义诊断</div>
+                <div class="seg-item" onclick="switchTab(3)">整车故障读写</div>
+            </div>
+
+            <div class="panel active" id="panel0">
+                <div class="btn-grid">
+                    <button class="func-btn" onclick="readDID('FDA3')">当前所有故障<br>FDA3</button>
+                    <button class="func-btn" onclick="readDID('FDA7')">上报应用层故障<br>FDA7</button>
+                    <button class="func-btn" onclick="readDID('FDA0')">DTC与DID故障<br>FDA0</button>
+                </div>
+            </div>
+
+            <div class="panel" id="panel1">
+                <div class="btn-grid">
+                    <button class="func-btn" onclick="startMask()">开始执行屏蔽</button>
+                </div>
+                <div style="margin-top:16px;">
+                    <div class="step-card" id="s1"><div class="step-title">步骤1：10 03 会话</div></div>
+                    <div class="step-card" id="s2"><div class="step-title">步骤2：3E 80 保活</div></div>
+                    <div class="step-card" id="s3">
+                        <div class="step-title">步骤3：27 01 获取 Seed</div>
+                        <div class="seed-box" id="seedShow"></div>
+                    </div>
+                    <div class="step-card" id="s4">
+                        <div class="step-title">步骤4：27 02 输入 Key</div>
+                        <input class="key-input" id="keyInput" placeholder="请输入Key">
+                        <button class="btn-run" onclick="sendKey()">确认解锁</button>
+                    </div>
+                    <div class="step-card" id="s5"><div class="step-title">步骤5：2E FD 00 写入</div></div>
+                    <div class="step-card" id="s6"><div class="step-title">步骤6：2E FD 01 写入</div></div>
+                </div>
+            </div>
+
+            <div class="panel" id="panel2">
+                <div class="custom-tip">
+                    提示：仅支持对ADM(6F)进行诊断，一行一条UDS指令<br>
+                    自动规则：多行间隔3s，全程1s自动3E80保活
+                </div>
+                <textarea class="custom-textarea" id="customCmdInput" placeholder="1003&#10;3E80&#10;2701&#10;2EFD00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF&#10;2EFD01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"></textarea>
+                <div class="btn-grid">
+                    <button class="func-btn" onclick="sendCustomCmd()">执行批量诊断</button>
+                    <button class="func-btn" onclick="clearCustomInput()">清空</button>
+                    <button class="func-btn" onclick="fillDemoCmd()">填入示例</button>
+                </div>
+            </div>
+
+            <div class="panel" id="panel3">
+                <div class="btn-grid">
+                    <button class="func-btn" onclick="readVehicleDtc()">读取整车故障</button>
+                    <button class="func-btn" onclick="clearVehicleDtc()">清除整车故障</button>
+                    <button class="func-btn" onclick="refreshNetStatus()">刷新状态</button>
+                </div>
+            </div>
+
+            <div id="faultResult" style="margin-top:24px;"></div>
+
+            <div class="log-header">
+                <div class="log-title">诊断日志</div>
+            </div>
+            <div class="log-box" id="logBox">工具已就绪</div>
+        </div>
+    </div>
+
+    <footer>SAM｜5th tool, Ver 0.8 All interpretation rights reserved.</footer>
+    <div class="loading" id="loading"><div class="loading-box"><div class="spinner"></div><div>处理中...</div></div></div>
+
+<script>
+    let currentLog = "工具已就绪";
+    let maskSeed = "";
+    function switchTab(idx){
+        const seg = document.getElementById('segMain');
+        seg.className = 'segmented seg-'+(idx+1);
+        document.querySelectorAll('.seg-item').forEach(e=>e.classList.remove('active'));
+        document.querySelectorAll('.seg-item')[idx].classList.add('active');
+        document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+        document.getElementById('panel'+idx).classList.add('active');
+        document.getElementById('faultResult').innerHTML='';
+        resetSteps();
+    }
+    function showLoading(){document.getElementById('loading').style.display='flex';}
+    function hideLoading(){document.getElementById('loading').style.display='none';}
+    async function readDID(did){
+        showLoading();
+        let res=await fetch('/read',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({did})});
+        let data=await res.json();
+        let t=new Date().toLocaleTimeString();
+        currentLog += `\\n\\n[${t}] ${did}诊断\\n`+data.log;
+        document.getElementById('logBox').innerText=currentLog;
+        document.getElementById('logBox').scrollTop=document.getElementById('logBox').scrollHeight;
+        let dom=document.getElementById('faultResult');dom.innerHTML='';
+        if(did==='FDA3'&&data.faults.length>0){
+            dom.innerHTML=`<div class="fault-title">检测到故障：${data.faults.length} 个</div>`
+            data.faults.forEach(i=>{
+                dom.innerHTML += `<div class="fault-card"><div class="fault-name">${i.name}</div><div class="fault-desc">Byte ${i.byte} · Bit ${i.bit} | ${i.desc}</div></div>`;
+            })
+        }
+        hideLoading();
+    }
+    function resetSteps(){document.querySelectorAll('.step-card').forEach(c=>c.classList.remove('step-done'));document.getElementById('seedShow').innerText='';document.getElementById('keyInput').value='';}
+    function setStep(n){for(let i=1;i<=n;i++)document.getElementById('s'+i).classList.add('step-done');}
+    async function startMask(){
+        resetSteps();showLoading();
+        let d=await (await fetch('/mask',{method:'POST',body:JSON.stringify({step:3}),headers:{'Content-Type':'application/json'}})).json();
+        let t=new Date().toLocaleTimeString();
+        currentLog += `\\n\\n[${t}] 屏蔽流程\\n`+d.log;
+        document.getElementById('logBox').innerText=currentLog;
+        document.getElementById('logBox').scrollTop=document.getElementById('logBox').scrollHeight;
+        setStep(d.step);maskSeed=d.seed;document.getElementById('seedShow').innerText="Seed："+maskSeed;
+        hideLoading();
+    }
+    async function sendKey(){
+        let key=document.getElementById('keyInput').value.trim();
+        if(!key)return alert("请输入密钥");
+        showLoading();
+        let d=await (await fetch('/mask',{method:'POST',body:JSON.stringify({step:6,key}),headers:{'Content-Type':'application/json'}})).json();
+        let t=new Date().toLocaleTimeString();
+        currentLog += `\\n\\n[${t}] 发送密钥解锁\\n`+d.log;
+        document.getElementById('logBox').innerText=currentLog;
+        document.getElementById('logBox').scrollTop=document.getElementById('logBox').scrollHeight;
+        setStep(d.step);
+        hideLoading();
+    }
+    async function sendCustomCmd(){
+        let txt=document.getElementById('customCmdInput').value;
+        if(!txt.trim())return alert("请输入UDS指令");
+        showLoading();
+        let res=await fetch('/customcmd',{method:'POST',body:JSON.stringify({cmd:txt}),headers:{'Content-Type':'application/json'}});
+        let data=await res.json();
+        let t=new Date().toLocaleTimeString();
+        currentLog += `\\n\\n[${t}] 自定义批量诊断\\n`+data.log;
+        document.getElementById('logBox').innerText=currentLog;
+        document.getElementById('logBox').scrollTop=document.getElementById('logBox').scrollHeight;
+        hideLoading();
+    }
+    function clearCustomInput(){document.getElementById('customCmdInput').value='';}
+    function fillDemoCmd(){
+        document.getElementById('customCmdInput').value=`1003
+3E80
+2701
+2EFD00FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+2EFD01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF`;
+    }
+    async function readVehicleDtc(){
+        showLoading();
+        let d=await (await fetch('/readdtc')).json();
+        let t=new Date().toLocaleTimeString();
+        currentLog += `\\n\\n[${t}] 读取整车故障\\n`+d.log;
+        document.getElementById('logBox').innerText=currentLog;
+        document.getElementById('logBox').scrollTop=document.getElementById('logBox').scrollHeight;
+        hideLoading();
+    }
+    async function clearVehicleDtc(){
+        showLoading();
+        let d=await (await fetch('/cleardtc')).json();
+        let t=new Date().toLocaleTimeString();
+        currentLog += `\\n\\n[${t}] 清除整车故障\\n`+d.log;
+        document.getElementById('logBox').innerText=currentLog;
+        document.getElementById('logBox').scrollTop=document.getElementById('logBox').scrollHeight;
+        hideLoading();
+    }
+    async function refreshNetStatus(){
+        let d=await (await fetch('/net')).json();
+        let el=document.getElementById('status');
+        if(d.connected){
+            el.className='status-pill status-online';
+            el.innerHTML='<div class="status-dot"></div><span>车端已连接</span>';
+        }else{
+            el.className='status-pill status-offline';
+            el.innerHTML='<div class="status-dot"></div><span>车端未连接</span>';
+        }
+    }
+    setInterval(refreshNetStatus,2000);
+    window.onload=refreshNetStatus;
+</script>
+</body>
+</html>
+''')
+
+# ====================== 接口 ======================
+@app.route("/read", methods=["POST"])
+def api_read_did():
+    return jsonify(read_did(request.json.get("did", "")))
+
+@app.route("/mask", methods=["POST"])
+def api_mask_func():
+    return jsonify(do_mask_process(request.json))
+
+@app.route("/net")
+def api_net_check():
+    return jsonify({"connected": check_vehicle_connection()})
+
+@app.route("/customcmd", methods=["POST"])
+def api_custom_cmd():
+    return jsonify({"log": send_custom_uds_cmds(request.json.get("cmd", ""))})
+
+@app.route("/readdtc")
+def api_read_dtc():
+    return jsonify({"log": read_all_dtc()})
+
+@app.route("/cleardtc")
+def api_clear_dtc():
+    return jsonify({"log": clear_all_dtc()})
+
+# ====================== 启动 ======================
+if __name__ == '__main__':
+    def run_flask():
+        app.run(host="127.0.0.1", port=SERVER_PORT, debug=False, use_reloader=False)
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(1.5)
+    webbrowser.open(f"http://127.0.0.1:{SERVER_PORT}")
+    while True:
+        time.sleep(1)
